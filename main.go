@@ -7,14 +7,15 @@ import (
 	"image"
 	"image/color"
 	_ "image/png"
+	"io"
 	"log"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/audio"
-	"github.com/hajimehoshi/ebiten/v2/audio/mp3"
-	"github.com/hajimehoshi/ebiten/v2/vector"
+	"github.com/olivierh59500/ym-player/pkg/stsound"
 )
 
 const (
@@ -22,10 +23,150 @@ const (
 	screenHeight = 540
 	fontWidth    = 62
 	fontHeight   = 50
+	sampleRate   = 44100
 )
 
 //go:embed assets/*
 var assets embed.FS
+
+// YMPlayer wraps the YM player for Ebiten audio
+type YMPlayer struct {
+	player       *stsound.StSound
+	sampleRate   int
+	buffer       []int16
+	mutex        sync.Mutex
+	position     int64
+	totalSamples int64
+	loop         bool
+	volume       float64
+}
+
+// NewYMPlayer creates a new YM player instance
+func NewYMPlayer(data []byte, sampleRate int, loop bool) (*YMPlayer, error) {
+	player := stsound.CreateWithRate(sampleRate)
+
+	if err := player.LoadMemory(data); err != nil {
+		player.Destroy()
+		return nil, fmt.Errorf("failed to load YM data: %w", err)
+	}
+
+	player.SetLoopMode(loop)
+
+	info := player.GetInfo()
+	totalSamples := int64(info.MusicTimeInMs) * int64(sampleRate) / 1000
+
+	return &YMPlayer{
+		player:       player,
+		sampleRate:   sampleRate,
+		buffer:       make([]int16, 4096),
+		totalSamples: totalSamples,
+		loop:         loop,
+		volume:       0.5,
+	}, nil
+}
+
+// Read implements io.Reader for audio streaming
+func (y *YMPlayer) Read(p []byte) (n int, err error) {
+	y.mutex.Lock()
+	defer y.mutex.Unlock()
+
+	samplesNeeded := len(p) / 4
+	outBuffer := make([]int16, samplesNeeded*2)
+
+	processed := 0
+	for processed < samplesNeeded {
+		chunkSize := samplesNeeded - processed
+		if chunkSize > len(y.buffer) {
+			chunkSize = len(y.buffer)
+		}
+
+		if !y.player.Compute(y.buffer[:chunkSize], chunkSize) {
+			if !y.loop {
+				for i := processed * 2; i < len(outBuffer); i++ {
+					outBuffer[i] = 0
+				}
+				err = io.EOF
+				break
+			}
+		}
+
+		for i := 0; i < chunkSize; i++ {
+			sample := int16(float64(y.buffer[i]) * y.volume)
+			outBuffer[(processed+i)*2] = sample
+			outBuffer[(processed+i)*2+1] = sample
+		}
+
+		processed += chunkSize
+		y.position += int64(chunkSize)
+	}
+
+	buf := make([]byte, 0, len(outBuffer)*2)
+	for _, sample := range outBuffer {
+		buf = append(buf, byte(sample), byte(sample>>8))
+	}
+
+	copy(p, buf)
+	n = len(buf)
+	if n > len(p) {
+		n = len(p)
+	}
+
+	return n, err
+}
+
+// SetVolume sets the playback volume (0.0 to 1.0)
+func (y *YMPlayer) SetVolume(volume float64) {
+	y.mutex.Lock()
+	defer y.mutex.Unlock()
+	y.volume = volume
+}
+
+// GetVolume returns the current volume
+func (y *YMPlayer) GetVolume() float64 {
+	y.mutex.Lock()
+	defer y.mutex.Unlock()
+	return y.volume
+}
+
+// Seek implements io.Seeker
+func (y *YMPlayer) Seek(offset int64, whence int) (int64, error) {
+	y.mutex.Lock()
+	defer y.mutex.Unlock()
+
+	var newPos int64
+	switch whence {
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekCurrent:
+		newPos = y.position + offset
+	case io.SeekEnd:
+		newPos = y.totalSamples + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+
+	if newPos < 0 {
+		newPos = 0
+	}
+	if newPos > y.totalSamples {
+		newPos = y.totalSamples
+	}
+
+	y.position = newPos
+	return newPos, nil
+}
+
+// Close releases resources
+func (y *YMPlayer) Close() error {
+	y.mutex.Lock()
+	defer y.mutex.Unlock()
+
+	if y.player != nil {
+		y.player.Destroy()
+		y.player = nil
+	}
+	return nil
+}
 
 // Vec3 représente un vecteur 3D
 type Vec3 struct {
@@ -81,6 +222,7 @@ type Game struct {
 	// Canvas virtuels
 	chessboard     *ebiten.Image
 	chessboardMask *ebiten.Image
+	theCanvas      *ebiten.Image
 	scrollCanvas1  *ebiten.Image
 	scrollCanvas2  *ebiten.Image
 	scrollCanvas3  *ebiten.Image
@@ -118,6 +260,7 @@ type Game struct {
 	// Audio
 	audioContext *audio.Context
 	audioPlayer  *audio.Player
+	ymPlayer     *YMPlayer
 
 	// Phases
 	jump bool
@@ -233,8 +376,9 @@ func (g *Game) Init() error {
 	}
 
 	// Créer les canvas virtuels
-	g.chessboard = ebiten.NewImage(1280, 80)
-	g.chessboardMask = ebiten.NewImage(1280, 80)
+	g.chessboard = ebiten.NewImage(320, 80)
+	g.chessboardMask = ebiten.NewImage(320, 80)
+	g.theCanvas = ebiten.NewImage(384, 270)
 	g.scrollCanvas1 = ebiten.NewImage(768, 50)
 	g.scrollCanvas2 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
 	g.scrollCanvas3 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
@@ -245,22 +389,24 @@ func (g *Game) Init() error {
 	g.precalcScrollX()
 
 	// Initialiser l'audio
-	g.audioContext = audio.NewContext(44100)
+	g.audioContext = audio.NewContext(sampleRate)
 
-	// Charger la musique MP3
-	musicData, err := assets.ReadFile("assets/music.mp3")
+	// Charger la musique YM
+	musicData, err := assets.ReadFile("assets/music.ym")
 	if err != nil {
 		fmt.Printf("Music not found (optional): %v\n", err)
 	} else {
-		musicReader := bytes.NewReader(musicData)
-		decodedMusic, err := mp3.DecodeWithSampleRate(44100, musicReader)
+		// Créer le lecteur YM
+		g.ymPlayer, err = NewYMPlayer(musicData, sampleRate, true)
 		if err != nil {
-			return fmt.Errorf("failed to decode music: %v", err)
+			return fmt.Errorf("failed to create YM player: %v", err)
 		}
 
-		loop := audio.NewInfiniteLoop(decodedMusic, decodedMusic.Length())
-		g.audioPlayer, err = g.audioContext.NewPlayer(loop)
+		// Créer le lecteur audio
+		g.audioPlayer, err = g.audioContext.NewPlayer(g.ymPlayer)
 		if err != nil {
+			g.ymPlayer.Close()
+			g.ymPlayer = nil
 			return fmt.Errorf("failed to create audio player: %v", err)
 		}
 
@@ -517,10 +663,16 @@ func drawQuad(img *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 float64, c color
 }
 
 // drawChessboard dessine le damier avec perspective
-func (g *Game) drawChessboard() {
-	g.chessboard.Clear()
+func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
+	// La couleur des bandes du damier
+	chessColor := color.RGBA{R: 136, G: 0, B: 136, A: 255} // #880088
 
-	g.xMove += g.xm * g.speed * 0.005
+	// Vider les canvas de travail
+	g.chessboard.Clear()
+	g.chessboardMask.Clear()
+
+	// 1. Dessiner les bandes verticales sur le canvas principal du damier
+	g.xMove += g.xm * g.speed * 0.01
 	if g.xMove > 32 {
 		g.xMove -= 32
 	}
@@ -528,18 +680,16 @@ func (g *Game) drawChessboard() {
 		g.xMove += 32
 	}
 
-	chessColor := color.RGBA{96, 96, 96, 255}
-
-	for i := -5; i < 50; i++ {
+	for i := 0; i < 11; i++ {
 		x1 := -8 + float64(i)*32 + g.xMove
 		x2 := 8 + float64(i)*32 + g.xMove
 		x3 := -752 + float64(i)*192 + g.xMove*6
 		x4 := -848 + float64(i)*192 + g.xMove*6
-
 		drawQuad(g.chessboard, x1, 0, x2, 0, x3, 80, x4, 80, chessColor)
 	}
 
-	g.yMove += g.ym * g.speed * 0.016
+	// 2. Dessiner les bandes horizontales sur le masque
+	g.yMove += g.ym * g.speed * 0.032
 	if g.yMove > 64 {
 		g.yMove -= 64
 	}
@@ -547,27 +697,22 @@ func (g *Game) drawChessboard() {
 		g.yMove += 64
 	}
 
-	g.chessboardMask.Clear()
-
 	for i := -2; i < 8; i++ {
 		y1 := -20 + (g.fov/(g.fov+float64(2*i)*32-g.yMove))*50
 		y2 := -20 + (g.fov/(g.fov+float64(2*i)*32+32-g.yMove))*50
-
-		if y1 > y2 {
-			y1, y2 = y2, y1
-		}
-
-		if y2 > y1 && y1 < 80 && y2 > 0 {
-			startY := math.Max(0, y1)
-			endY := math.Min(80, y2)
-
-			vector.DrawFilledRect(g.chessboardMask, 0, float32(startY), 1280, float32(endY-startY), chessColor, false)
-		}
+		drawQuad(g.chessboardMask, 0, y1, 320, y1, 320, y2, 0, y2, chessColor)
 	}
 
+	// 3. Appliquer le masque sur le canvas du damier avec l'opération XOR
+	// 3. Appliquer le masque sur le canvas du damier avec l'opération XOR
 	op := &ebiten.DrawImageOptions{}
 	op.CompositeMode = ebiten.CompositeModeXor
 	g.chessboard.DrawImage(g.chessboardMask, op)
+
+	// 4. Dessiner le damier final sur le canvas de destination
+	drawOp := &ebiten.DrawImageOptions{}
+	drawOp.GeoM.Translate(32, 149)
+	destinationCanvas.DrawImage(g.chessboard, drawOp)
 }
 
 // getMovement retourne les paramètres d'animation selon l'index
@@ -716,6 +861,24 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 
 // Update met à jour l'état du jeu
 func (g *Game) Update() error {
+	// Contrôle du volume avec les touches haut/bas
+	if g.ymPlayer != nil {
+		if ebiten.IsKeyPressed(ebiten.KeyUp) {
+			vol := g.ymPlayer.GetVolume() + 0.01
+			if vol > 1.0 {
+				vol = 1.0
+			}
+			g.ymPlayer.SetVolume(vol)
+		}
+		if ebiten.IsKeyPressed(ebiten.KeyDown) {
+			vol := g.ymPlayer.GetVolume() - 0.01
+			if vol < 0 {
+				vol = 0
+			}
+			g.ymPlayer.SetVolume(vol)
+		}
+	}
+
 	if !g.jump {
 		// Phase d'intro - détecter le caractère '\'
 		charIndex := int(g.scrollX1 / float64(fontWidth))
@@ -757,14 +920,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		// 2. Dessiner les montagnes
 		screen.DrawImage(g.mountains, nil)
 
-		// 3. Préparer le damier
-		g.drawChessboard()
+		// 3. Préparer le damier sur le canvas intermédiaire
+		g.theCanvas.Clear()
+		g.drawChessboard(g.theCanvas)
 
-		// 4. Dessiner le damier
+		// 4. Dessiner le canvas intermédiaire sur l'écran final avec transformation
 		op = &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(0.6, 2.6)
-		op.GeoM.Translate(0, 260)
-		screen.DrawImage(g.chessboard, op)
+		op.GeoM.Scale(2, 2.6) // Agrandissement
+		op.GeoM.Translate(0, -128) // Décalage
+		screen.DrawImage(g.theCanvas, op)
 
 		// 5. Dessiner le scroller avec effets
 		g.drawScroller(screen)
@@ -779,6 +943,18 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return screenWidth, screenHeight
 }
 
+// Cleanup nettoie les ressources
+func (g *Game) Cleanup() {
+	if g.audioPlayer != nil {
+		g.audioPlayer.Close()
+		g.audioPlayer = nil
+	}
+	if g.ymPlayer != nil {
+		g.ymPlayer.Close()
+		g.ymPlayer = nil
+	}
+}
+
 func main() {
 	game := NewGame()
 
@@ -788,6 +964,9 @@ func main() {
 
 	ebiten.SetWindowSize(screenWidth, screenHeight)
 	ebiten.SetWindowTitle("TCB 3D DOC Demo - Go/Ebiten")
+
+	// Assurer le nettoyage à la sortie
+	defer game.Cleanup()
 
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)

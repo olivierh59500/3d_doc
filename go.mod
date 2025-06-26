@@ -1,8 +1,11 @@
 module 3d_doc
 
-go 1.24.3
+go 1.24.4
 
-require github.com/hajimehoshi/ebiten/v2 v2.8.8
+require (
+	github.com/hajimehoshi/ebiten/v2 v2.8.8
+	github.com/olivierh59500/ym-player v0.0.0-20250607015657-bb5818debd02
+)
 
 require (
 	github.com/ebitengine/gomobile v0.0.0-20240911145611-4856209ac325 // indirect
@@ -12,5 +15,5 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4 // indirect
 	github.com/jezek/xgb v1.1.1 // indirect
 	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/sys v0.25.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
 )
