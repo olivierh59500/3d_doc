@@ -12,7 +12,6 @@ import (
 	"log"
 	"math"
 	"sync"
-	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/audio"
@@ -24,7 +23,15 @@ const (
 	screenHeight = 540
 	fontWidth    = 62
 	fontHeight   = 50
+	glyphCount   = 59
+	scrollerRows = 25
 	sampleRate   = 44100
+	animDuration = 7.0
+	focalLength  = 400.0
+	ballWidth    = 64.0
+	ballHeight   = 64.0
+	shadowWidth  = 64.0
+	shadowHeight = 16.0
 )
 
 //go:embed assets/backdrop.png assets/ball.png assets/font_out.png assets/kh6.png assets/mountains.png assets/music.ym assets/shadow*.png
@@ -32,14 +39,14 @@ var assets embed.FS
 
 // YMPlayer wraps the YM player for Ebiten audio
 type YMPlayer struct {
-	player       *stsound.StSound
-	sampleRate   int
-	buffer       []int16
-	mutex        sync.Mutex
-	position     int64
-	totalSamples int64
-	loop         bool
-	volume       float64
+	player        *stsound.StSound
+	buffer        []int16
+	mutex         sync.Mutex
+	pendingFrame  [4]byte
+	pendingOffset int
+	pendingCount  int
+	loop          bool
+	volume        float64
 }
 
 // NewYMPlayer creates a new YM player instance
@@ -53,16 +60,11 @@ func NewYMPlayer(data []byte, sampleRate int, loop bool) (*YMPlayer, error) {
 
 	player.SetLoopMode(loop)
 
-	info := player.GetInfo()
-	totalSamples := int64(info.MusicTimeInMs) * int64(sampleRate) / 1000
-
 	return &YMPlayer{
-		player:       player,
-		sampleRate:   sampleRate,
-		buffer:       make([]int16, 4096),
-		totalSamples: totalSamples,
-		loop:         loop,
-		volume:       0.5,
+		player: player,
+		buffer: make([]int16, 4096),
+		loop:   loop,
+		volume: 0.5,
 	}, nil
 }
 
@@ -71,55 +73,76 @@ func (y *YMPlayer) Read(p []byte) (n int, err error) {
 	y.mutex.Lock()
 	defer y.mutex.Unlock()
 
-	samplesNeeded := len(p) / 4
-	outBuffer := make([]int16, samplesNeeded*2)
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if y.player == nil {
+		return 0, io.ErrClosedPipe
+	}
 
-	processed := 0
-	for processed < samplesNeeded {
-		chunkSize := samplesNeeded - processed
+	if y.pendingCount > 0 {
+		copied := copy(p, y.pendingFrame[y.pendingOffset:y.pendingOffset+y.pendingCount])
+		y.pendingOffset += copied
+		y.pendingCount -= copied
+		n += copied
+		if y.pendingCount == 0 {
+			y.pendingOffset = 0
+		}
+		if n == len(p) {
+			return n, nil
+		}
+	}
+
+	for len(p)-n >= 4 {
+		chunkSize := (len(p) - n) / 4
 		if chunkSize > len(y.buffer) {
 			chunkSize = len(y.buffer)
 		}
 
 		if !y.player.Compute(y.buffer[:chunkSize], chunkSize) {
 			if !y.loop {
-				for i := processed * 2; i < len(outBuffer); i++ {
-					outBuffer[i] = 0
-				}
-				err = io.EOF
-				break
+				clear(p[n:])
+				return len(p), io.EOF
 			}
 		}
 
 		for i := 0; i < chunkSize; i++ {
 			sample := int16(float64(y.buffer[i]) * y.volume)
-			outBuffer[(processed+i)*2] = sample
-			outBuffer[(processed+i)*2+1] = sample
+			pos := n + i*4
+			low := byte(sample)
+			high := byte(uint16(sample) >> 8)
+			p[pos] = low
+			p[pos+1] = high
+			p[pos+2] = low
+			p[pos+3] = high
 		}
 
-		processed += chunkSize
-		y.position += int64(chunkSize)
+		n += chunkSize * 4
 	}
 
-	buf := make([]byte, 0, len(outBuffer)*2)
-	for _, sample := range outBuffer {
-		buf = append(buf, byte(sample), byte(sample>>8))
+	if n == len(p) {
+		return n, nil
 	}
 
-	copy(p, buf)
-	n = len(buf)
-	if n > len(p) {
-		n = len(p)
+	if !y.player.Compute(y.buffer[:1], 1) && !y.loop {
+		clear(p[n:])
+		return len(p), io.EOF
 	}
+	sample := int16(float64(y.buffer[0]) * y.volume)
+	y.pendingFrame = [4]byte{byte(sample), byte(uint16(sample) >> 8), byte(sample), byte(uint16(sample) >> 8)}
+	copied := copy(p[n:], y.pendingFrame[:])
+	n += copied
+	y.pendingOffset = copied
+	y.pendingCount = len(y.pendingFrame) - copied
 
-	return n, err
+	return n, nil
 }
 
 // SetVolume sets the playback volume (0.0 to 1.0)
 func (y *YMPlayer) SetVolume(volume float64) {
 	y.mutex.Lock()
 	defer y.mutex.Unlock()
-	y.volume = volume
+	y.volume = max(0, min(1, volume))
 }
 
 // GetVolume returns the current volume
@@ -127,34 +150,6 @@ func (y *YMPlayer) GetVolume() float64 {
 	y.mutex.Lock()
 	defer y.mutex.Unlock()
 	return y.volume
-}
-
-// Seek implements io.Seeker
-func (y *YMPlayer) Seek(offset int64, whence int) (int64, error) {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-
-	var newPos int64
-	switch whence {
-	case io.SeekStart:
-		newPos = offset
-	case io.SeekCurrent:
-		newPos = y.position + offset
-	case io.SeekEnd:
-		newPos = y.totalSamples + offset
-	default:
-		return 0, fmt.Errorf("invalid whence: %d", whence)
-	}
-
-	if newPos < 0 {
-		newPos = 0
-	}
-	if newPos > y.totalSamples {
-		newPos = y.totalSamples
-	}
-
-	y.position = newPos
-	return newPos, nil
 }
 
 // Close releases resources
@@ -212,12 +207,12 @@ type Anim struct {
 // Game représente l'état du jeu
 type Game struct {
 	// Images
-	backdrop  *ebiten.Image
-	mountains *ebiten.Image
-	font1     *ebiten.Image
-	fontOut   *ebiten.Image
-	sphere    *ebiten.Image
-	shadows   [4]*ebiten.Image
+	backdrop       *ebiten.Image
+	mountains      *ebiten.Image
+	introGlyphs    [glyphCount]*ebiten.Image
+	scrollerGlyphs [glyphCount]*ebiten.Image
+	sphere         *ebiten.Image
+	shadows        [4]*ebiten.Image
 
 	// Canvas virtuels
 	chessboard     *ebiten.Image
@@ -228,6 +223,11 @@ type Game struct {
 	scrollCanvas2  *ebiten.Image
 	scrollCanvas3  *ebiten.Image
 	scrollCanvas5  *ebiten.Image
+	scrollRows2    [scrollerRows]*ebiten.Image
+	scrollRows3    [scrollerRows]*ebiten.Image
+	scrollVisible  *ebiten.Image
+	quadVertices   []ebiten.Vertex
+	quadIndices    []uint16
 
 	// Variables d'animation
 	vbl   float64
@@ -253,8 +253,9 @@ type Game struct {
 
 	// 3D Doc animation
 	currentRadians             float64
+	docRadians                 [4]float64
 	overWriteFirstTwoWaveforms bool
-	startTime                  time.Time
+	elapsedSeconds             float64
 
 	// Audio
 	audioContext *audio.Context
@@ -277,7 +278,6 @@ func NewGame() *Game {
 		fov:                        250,
 		speed:                      1,
 		overWriteFirstTwoWaveforms: true,
-		startTime:                  time.Now(),
 	}
 
 	// Textes
@@ -300,6 +300,16 @@ func (g *Game) loadImage(path string) (*ebiten.Image, error) {
 	}
 
 	return ebiten.NewImageFromImage(img), nil
+}
+
+func splitFont(font *ebiten.Image) [glyphCount]*ebiten.Image {
+	var glyphs [glyphCount]*ebiten.Image
+	for index := range glyphs {
+		srcX := (index % 10) * fontWidth
+		srcY := (index / 10) * fontHeight
+		glyphs[index] = font.SubImage(image.Rect(srcX, srcY, srcX+fontWidth, srcY+fontHeight)).(*ebiten.Image)
+	}
+	return glyphs
 }
 
 // precalcScrollX précalcule les valeurs de déplacement du scroll
@@ -350,15 +360,17 @@ func (g *Game) Init() error {
 		return fmt.Errorf("load mountains: %w", err)
 	}
 
-	g.font1, err = g.loadImage("assets/kh6.png")
+	introFont, err := g.loadImage("assets/kh6.png")
 	if err != nil {
 		return fmt.Errorf("load intro font: %w", err)
 	}
+	g.introGlyphs = splitFont(introFont)
 
-	g.fontOut, err = g.loadImage("assets/font_out.png")
+	scrollerFont, err := g.loadImage("assets/font_out.png")
 	if err != nil {
 		return fmt.Errorf("load scroller font: %w", err)
 	}
+	g.scrollerGlyphs = splitFont(scrollerFont)
 
 	g.sphere, err = g.loadImage("assets/ball.png")
 	if err != nil {
@@ -383,6 +395,14 @@ func (g *Game) Init() error {
 	g.scrollCanvas2 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
 	g.scrollCanvas3 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
 	g.scrollCanvas5 = ebiten.NewImage(1024, 120) // Plus large pour les déformations
+	for row := 0; row < scrollerRows; row++ {
+		srcRect := image.Rect(0, row*2, 1024, (row+1)*2)
+		g.scrollRows2[row] = g.scrollCanvas2.SubImage(srcRect).(*ebiten.Image)
+		g.scrollRows3[row] = g.scrollCanvas3.SubImage(srcRect).(*ebiten.Image)
+	}
+	g.scrollVisible = g.scrollCanvas5.SubImage(image.Rect(128, 0, 896, 120)).(*ebiten.Image)
+	g.quadVertices = make([]ebiten.Vertex, 0, 44)
+	g.quadIndices = make([]uint16, 0, 66)
 
 	// Précalculer les valeurs de scroll
 	g.precalcScrollX()
@@ -419,123 +439,50 @@ func (g *Game) initAudio() error {
 	return nil
 }
 
-// drawChar dessine un caractère de la font
-func (g *Game) drawChar(dst *ebiten.Image, font *ebiten.Image, char byte, x, y float64, scale float64) {
-	index := 0
-
-	switch char {
-	case 32:
-		index = 0
-	case 33:
-		index = 1
-	case 39:
-		index = 7
-	case 40:
-		index = 8
-	case 41:
-		index = 9
-	case 44:
-		index = 12
-	case 45:
-		index = 13
-	case 46:
-		index = 14
-	case 48:
-		index = 16
-	case 49:
-		index = 17
-	case 50:
-		index = 18
-	case 51:
-		index = 19
-	case 52:
-		index = 20
-	case 53:
-		index = 21
-	case 54:
-		index = 22
-	case 55:
-		index = 23
-	case 56:
-		index = 24
-	case 57:
-		index = 25
-	case 58:
-		index = 26
-	case 59:
-		index = 27
-	case 63:
-		index = 31
-	case 65, 97:
-		index = 33
-	case 66, 98:
-		index = 34
-	case 67, 99:
-		index = 35
-	case 68, 100:
-		index = 36
-	case 69, 101:
-		index = 37
-	case 70, 102:
-		index = 38
-	case 71, 103:
-		index = 39
-	case 72, 104:
-		index = 40
-	case 73, 105:
-		index = 41
-	case 74, 106:
-		index = 42
-	case 75, 107:
-		index = 43
-	case 76, 108:
-		index = 44
-	case 77, 109:
-		index = 45
-	case 78, 110:
-		index = 46
-	case 79, 111:
-		index = 47
-	case 80, 112:
-		index = 48
-	case 81, 113:
-		index = 49
-	case 82, 114:
-		index = 50
-	case 83, 115:
-		index = 51
-	case 84, 116:
-		index = 52
-	case 85, 117:
-		index = 53
-	case 86, 118:
-		index = 54
-	case 87, 119:
-		index = 55
-	case 88, 120:
-		index = 56
-	case 89, 121:
-		index = 57
-	case 90, 122:
-		index = 58
+func glyphIndex(char byte) int {
+	switch {
+	case char == '!':
+		return 1
+	case char == '\'':
+		return 7
+	case char == '(':
+		return 8
+	case char == ')':
+		return 9
+	case char == ',':
+		return 12
+	case char == '-':
+		return 13
+	case char == '.':
+		return 14
+	case char >= '0' && char <= '9':
+		return 16 + int(char-'0')
+	case char == ':':
+		return 26
+	case char == ';':
+		return 27
+	case char == '?':
+		return 31
+	case char >= 'A' && char <= 'Z':
+		return 33 + int(char-'A')
+	case char >= 'a' && char <= 'z':
+		return 33 + int(char-'a')
 	default:
-		index = 0
+		return 0
 	}
+}
 
-	cols := 10
-	srcX := (index % cols) * fontWidth
-	srcY := (index / cols) * fontHeight
+// drawChar dessine un caractère de la font.
+func (g *Game) drawChar(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, char byte, x, y, scale float64) {
 
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Scale(scale, scale)
 	op.GeoM.Translate(x, y)
-
-	charImg := font.SubImage(image.Rect(srcX, srcY, srcX+fontWidth, srcY+fontHeight)).(*ebiten.Image)
-	dst.DrawImage(charImg, op)
+	dst.DrawImage(glyphs[glyphIndex(char)], op)
 }
 
 // drawScrollText dessine un texte défilant
-func (g *Game) drawScrollText(dst *ebiten.Image, font *ebiten.Image, text string, scrollX float64) float64 {
+func (g *Game) drawScrollText(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, text string, scrollX float64) {
 	charSpacing := float64(fontWidth)
 	startChar := int(scrollX / charSpacing)
 	offset := math.Mod(scrollX, charSpacing)
@@ -551,12 +498,9 @@ func (g *Game) drawScrollText(dst *ebiten.Image, font *ebiten.Image, text string
 
 		x := float64(i)*charSpacing - offset
 		if x >= -charSpacing && x < float64(dst.Bounds().Dx())+charSpacing {
-			g.drawChar(dst, font, text[charIndex], x, 0, 1)
+			g.drawChar(dst, glyphs, text[charIndex], x, 0, 1)
 		}
 	}
-
-	// Vitesse de défilement
-	return math.Mod(scrollX+3, float64(len(text))*charSpacing)
 }
 
 // drawScroller dessine le scroller avec effets
@@ -567,16 +511,15 @@ func (g *Game) drawScroller(screen *ebiten.Image) {
 	g.scrollCanvas5.Clear()
 
 	// Dessiner le texte sur le canvas élargi
-	g.scrollX2 = g.drawScrollText(g.scrollCanvas2, g.fontOut, g.text2, g.scrollX2)
+	g.drawScrollText(g.scrollCanvas2, &g.scrollerGlyphs, g.text2, g.scrollX2)
 
 	// Effet de vague sur le scroller
-	for j := 0; j < 25; j++ {
-		srcRect := image.Rect(0, j*2, 1024, (j+1)*2)
+	for j := 0; j < scrollerRows; j++ {
 		dstX := g.scrollX[(g.vbl3+j)%g.scrollXMod]
 
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(dstX, float64(j*2))
-		g.scrollCanvas3.DrawImage(g.scrollCanvas2.SubImage(srcRect).(*ebiten.Image), op)
+		g.scrollCanvas3.DrawImage(g.scrollRows2[j], op)
 	}
 
 	// Effet de rebond vertical
@@ -584,8 +527,7 @@ func (g *Game) drawScroller(screen *ebiten.Image) {
 	yOffset := 30 + 30*math.Cos(g.vbl4/20)
 
 	// On dessine le scroller avec un décalage vertical
-	for j := 0; j < 25; j++ {
-		srcRect := image.Rect(0, j*2, 1024, (j+1)*2)
+	for j := 0; j < scrollerRows; j++ {
 		dstX := g.scrollX[(g.vbl3+j)%g.scrollXMod]
 
 		// Position verticale avec l'effet de rebond
@@ -593,30 +535,28 @@ func (g *Game) drawScroller(screen *ebiten.Image) {
 
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(dstX, dstY)
-		g.scrollCanvas5.DrawImage(g.scrollCanvas3.SubImage(srcRect).(*ebiten.Image), op)
+		g.scrollCanvas5.DrawImage(g.scrollRows3[j], op)
 	}
-
-	// Extraire la partie visible centrée et dessiner directement
-	offsetX := (1024 - 768) / 2
-	visibleRect := image.Rect(offsetX, 0, offsetX+768, 120)
 
 	// Dessiner le résultat final directement sur l'écran
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Translate(0, 62)
-	screen.DrawImage(g.scrollCanvas5.SubImage(visibleRect).(*ebiten.Image), op)
-
-	g.vbl4 += 1.2
-	g.vbl3++
+	screen.DrawImage(g.scrollVisible, op)
 }
 
-// drawQuad dessine un quadrilatère rempli
-func drawQuad(img, whitePixel *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 float64, c color.RGBA) {
+func (g *Game) resetQuadBatch() {
+	g.quadVertices = g.quadVertices[:0]
+	g.quadIndices = g.quadIndices[:0]
+}
+
+func (g *Game) appendQuad(x1, y1, x2, y2, x3, y3, x4, y4 float64, c color.RGBA) {
 	red := float32(c.R) / 255
 	green := float32(c.G) / 255
 	blue := float32(c.B) / 255
 	alpha := float32(c.A) / 255
-	vertices := []ebiten.Vertex{
-		{
+	base := uint16(len(g.quadVertices))
+	g.quadVertices = append(g.quadVertices,
+		ebiten.Vertex{
 			DstX:   float32(x1),
 			DstY:   float32(y1),
 			SrcX:   0,
@@ -626,7 +566,7 @@ func drawQuad(img, whitePixel *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 floa
 			ColorB: blue,
 			ColorA: alpha,
 		},
-		{
+		ebiten.Vertex{
 			DstX:   float32(x2),
 			DstY:   float32(y2),
 			SrcX:   0,
@@ -636,7 +576,7 @@ func drawQuad(img, whitePixel *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 floa
 			ColorB: blue,
 			ColorA: alpha,
 		},
-		{
+		ebiten.Vertex{
 			DstX:   float32(x3),
 			DstY:   float32(y3),
 			SrcX:   0,
@@ -646,7 +586,7 @@ func drawQuad(img, whitePixel *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 floa
 			ColorB: blue,
 			ColorA: alpha,
 		},
-		{
+		ebiten.Vertex{
 			DstX:   float32(x4),
 			DstY:   float32(y4),
 			SrcX:   0,
@@ -656,14 +596,14 @@ func drawQuad(img, whitePixel *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 floa
 			ColorB: blue,
 			ColorA: alpha,
 		},
-	}
+	)
+	g.quadIndices = append(g.quadIndices, base, base+1, base+2, base+2, base+3, base)
+}
 
-	indices := []uint16{0, 1, 2, 2, 3, 0}
-
+func (g *Game) drawQuadBatch(destination *ebiten.Image) {
 	op := &ebiten.DrawTrianglesOptions{}
 	op.FillRule = ebiten.FillAll
-
-	img.DrawTriangles(vertices, indices, whitePixel, op)
+	destination.DrawTriangles(g.quadVertices, g.quadIndices, g.whitePixel, op)
 }
 
 // drawChessboard dessine le damier avec perspective
@@ -674,38 +614,26 @@ func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
 	// Vider les canvas de travail
 	g.chessboard.Clear()
 	g.chessboardMask.Clear()
+	g.resetQuadBatch()
 
 	// 1. Dessiner les bandes verticales sur le canvas principal du damier
-	g.xMove += g.xm * g.speed * 0.01
-	if g.xMove > 32 {
-		g.xMove -= 32
-	}
-	if g.xMove < 0 {
-		g.xMove += 32
-	}
-
 	for i := 0; i < 11; i++ {
 		x1 := -8 + float64(i)*32 + g.xMove
 		x2 := 8 + float64(i)*32 + g.xMove
 		x3 := -752 + float64(i)*192 + g.xMove*6
 		x4 := -848 + float64(i)*192 + g.xMove*6
-		drawQuad(g.chessboard, g.whitePixel, x1, 0, x2, 0, x3, 80, x4, 80, chessColor)
+		g.appendQuad(x1, 0, x2, 0, x3, 80, x4, 80, chessColor)
 	}
+	g.drawQuadBatch(g.chessboard)
 
 	// 2. Dessiner les bandes horizontales sur le masque
-	g.yMove += g.ym * g.speed * 0.032
-	if g.yMove > 64 {
-		g.yMove -= 64
-	}
-	if g.yMove < 0 {
-		g.yMove += 64
-	}
-
+	g.resetQuadBatch()
 	for i := -2; i < 8; i++ {
 		y1 := -20 + (g.fov/(g.fov+float64(2*i)*32-g.yMove))*50
 		y2 := -20 + (g.fov/(g.fov+float64(2*i)*32+32-g.yMove))*50
-		drawQuad(g.chessboardMask, g.whitePixel, 0, y1, 320, y1, 320, y2, 0, y2, chessColor)
+		g.appendQuad(0, y1, 320, y1, 320, y2, 0, y2, chessColor)
 	}
+	g.drawQuadBatch(g.chessboardMask)
 
 	// 3. Appliquer le masque sur le canvas du damier avec l'opération XOR
 	op := &ebiten.DrawImageOptions{}
@@ -756,50 +684,44 @@ func blendAnim(a, b Anim, alpha float64) Anim {
 	}
 }
 
-// drawDoc dessine les sphères 3D animées
-func (g *Game) drawDoc(screen *ebiten.Image) {
-	const (
-		FOCAL_LENGTH  = 400
-		BALL_WIDTH    = 64
-		BALL_HEIGHT   = 64
-		SHADOW_WIDTH  = 64
-		SHADOW_HEIGHT = 16
-		ANIM_DURATION = 7
+func (g *Game) currentMovement(t float64, ball int) Anim {
+	animIndex := int(t/animDuration) % 8
+	if !g.overWriteFirstTwoWaveforms && animIndex < 2 {
+		animIndex = 2 + int(t/animDuration)%6
+	}
+	if g.overWriteFirstTwoWaveforms && animIndex < 2 {
+		animIndex = 7
+	}
+
+	alpha := math.Min(1, math.Mod(t/animDuration, 1)*animDuration*0.8)
+	return blendAnim(
+		getMovement(animIndex, t, ball),
+		getMovement(animIndex+1, t, ball),
+		alpha,
 	)
+}
 
-	t := time.Since(g.startTime).Seconds()
-
-	// Gestion de la boucle d'animation
-	if g.overWriteFirstTwoWaveforms && t > ANIM_DURATION*3 {
+func (g *Game) updateDocAnimation() {
+	if g.overWriteFirstTwoWaveforms && g.elapsedSeconds > animDuration*3 {
 		g.overWriteFirstTwoWaveforms = false
 	}
 
-	balls := make([]Sprite, 4)
-	ballShadows := make([]Sprite, 4)
+	for ball := range g.docRadians {
+		anim := g.currentMovement(g.elapsedSeconds, ball)
+		g.currentRadians += (math.Pi * 2 / 360) * anim.SpinSpeed * 0.15
+		g.currentRadians = math.Mod(g.currentRadians, math.Pi*2)
+		g.docRadians[ball] = g.currentRadians
+	}
+}
+
+// drawDoc dessine les sphères 3D animées
+func (g *Game) drawDoc(screen *ebiten.Image) {
+	t := g.elapsedSeconds
+	var balls [4]Sprite
+	var ballShadows [4]Sprite
 
 	for i := 0; i < 4; i++ {
-		// Déterminer l'index d'animation actuel
-		animIndex := int(t/ANIM_DURATION) % 8 // Changé de 7 à 8 pour inclure plus de variations
-
-		// Après les 3 premières boucles, éviter les animations 0 et 1
-		if !g.overWriteFirstTwoWaveforms && animIndex < 2 {
-			animIndex = 2 + int(t/ANIM_DURATION)%6
-		}
-
-		// Si on est dans les 3 premières boucles et sur les animations 0 ou 1,
-		// forcer l'utilisation de l'animation 7
-		if g.overWriteFirstTwoWaveforms && animIndex < 2 {
-			animIndex = 7
-		}
-
-		// Calculer l'alpha pour le blend entre deux animations
-		// Réduire la vitesse de transition pour plus de fluidité
-		alpha := math.Min(1, math.Mod(t/ANIM_DURATION, 1)*ANIM_DURATION*0.8) // Changé de 1.3 à 0.8
-
-		// Obtenir les deux mouvements à mélanger
-		a := getMovement(animIndex, t, i)
-		b := getMovement(animIndex+1, t, i)
-		anim := blendAnim(a, b, alpha)
+		anim := g.currentMovement(t, i)
 
 		// Créer la position de base sur le cercle
 		currentPos := Vec3{X: anim.RadiusFromCenterOfScreen, Y: 0, Z: 0}
@@ -809,23 +731,19 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 		d := Vec3{X: 0, Y: anim.Displace, Z: 0}
 		p := Vec3{X: currentPos.X + d.X, Y: currentPos.Y + d.Y, Z: currentPos.Z + d.Z}
 
-		// IMPORTANT: Accumuler currentRadians AVANT de l'utiliser
-		// Réduire la vitesse de rotation pour plus de fluidité
-		g.currentRadians += (math.Pi * 2 / 360) * anim.SpinSpeed * 0.15 // Changé de 0.2 à 0.15
-		g.currentRadians = math.Mod(g.currentRadians, math.Pi*2)
-		p.RotateY(g.currentRadians)
+		p.RotateY(g.docRadians[i])
 
 		// Position de l'ombre (au sol)
 		ps := Vec3{X: p.X, Y: 60, Z: p.Z}
 
 		// Créer les sprites pour la boule et son ombre
-		balls[i] = NewSprite(p, FOCAL_LENGTH, screenWidth, screenHeight)
-		ballShadows[i] = NewSprite(ps, FOCAL_LENGTH, screenWidth, screenHeight)
+		balls[i] = NewSprite(p, focalLength, screenWidth, screenHeight)
+		ballShadows[i] = NewSprite(ps, focalLength, screenWidth, screenHeight)
 	}
 
 	// Trier par profondeur Z (plus loin en premier)
 	// Créer des indices pour maintenir la correspondance boule/ombre
-	indices := []int{0, 1, 2, 3}
+	indices := [4]int{0, 1, 2, 3}
 	for i := 0; i < 3; i++ {
 		for j := i + 1; j < 4; j++ {
 			if balls[indices[i]].Z < balls[indices[j]].Z {
@@ -844,8 +762,8 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(ballShadows[idx].W, ballShadows[idx].W)
 		op.GeoM.Translate(
-			ballShadows[idx].U-SHADOW_WIDTH*0.5,
-			ballShadows[idx].V-SHADOW_HEIGHT*0.5-verticalDisplace,
+			ballShadows[idx].U-shadowWidth*0.5,
+			ballShadows[idx].V-shadowHeight*0.5-verticalDisplace,
 		)
 		screen.DrawImage(g.shadows[shadowColor], op)
 	}
@@ -855,11 +773,40 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(balls[idx].W, balls[idx].W)
 		op.GeoM.Translate(
-			balls[idx].U-BALL_WIDTH*0.5,
-			balls[idx].V-BALL_HEIGHT*0.5,
+			balls[idx].U-ballWidth*0.5,
+			balls[idx].V-ballHeight*0.5,
 		)
 		screen.DrawImage(g.sphere, op)
 	}
+}
+
+func wrap(value, period float64) float64 {
+	value = math.Mod(value, period)
+	if value < 0 {
+		value += period
+	}
+	return value
+}
+
+func advanceScroll(position, speed float64, text string) float64 {
+	if len(text) == 0 {
+		return 0
+	}
+	return wrap(position+speed, float64(len(text)*fontWidth))
+}
+
+func (g *Game) updateMainAnimation() {
+	g.speed = -math.Cos(g.vbl / 40)
+	g.vbl += 0.16
+	g.xm = 128 * math.Cos(g.vbl2/40)
+	g.vbl2 += 0.8
+
+	g.xMove = wrap(g.xMove+g.xm*g.speed*0.01, 32)
+	g.yMove = wrap(g.yMove+g.ym*g.speed*0.032, 64)
+	g.scrollX2 = advanceScroll(g.scrollX2, 3, g.text2)
+	g.vbl4 += 1.2
+	g.vbl3 = (g.vbl3 + 1) % g.scrollXMod
+	g.updateDocAnimation()
 }
 
 // Update met à jour l'état du jeu
@@ -889,6 +836,7 @@ func (g *Game) Update() error {
 			g.ymPlayer.SetVolume(vol)
 		}
 	}
+	g.elapsedSeconds += 1.0 / ebiten.DefaultTPS
 
 	if !g.jump {
 		// Phase d'intro - détecter le caractère '\'
@@ -896,13 +844,11 @@ func (g *Game) Update() error {
 		if charIndex < len(g.text1) && g.text1[charIndex] == '\\' {
 			g.jump = true
 		}
-		g.scrollX1 = math.Mod(g.scrollX1+2, float64(len(g.text1))*float64(fontWidth))
+		// L'ancienne version avançait de 2 dans Update et de 3 dans Draw.
+		// Conserver le total de 5 par tick rend le rythme indépendant du rafraîchissement.
+		g.scrollX1 = advanceScroll(g.scrollX1, 5, g.text1)
 	} else {
-		// Animation principale
-		g.speed = -1 * math.Cos(g.vbl/40)
-		g.vbl += 0.16
-		g.xm = 128 * math.Cos(g.vbl2/40)
-		g.vbl2 += 0.8
+		g.updateMainAnimation()
 	}
 
 	return nil
@@ -916,7 +862,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if !g.jump {
 		// Phase d'intro
 		g.scrollCanvas1.Clear()
-		g.scrollX1 = g.drawScrollText(g.scrollCanvas1, g.font1, g.text1, g.scrollX1)
+		g.drawScrollText(g.scrollCanvas1, &g.introGlyphs, g.text1, g.scrollX1)
 
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(0, 62)
