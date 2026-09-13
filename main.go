@@ -1,4 +1,5 @@
-package main
+// Package threeddoc implements the TCB 3D DOC demo.
+package threeddoc
 
 import (
 	"bytes"
@@ -26,7 +27,7 @@ const (
 	sampleRate   = 44100
 )
 
-//go:embed assets/*
+//go:embed assets/backdrop.png assets/ball.png assets/font_out.png assets/kh6.png assets/mountains.png assets/music.ym assets/shadow*.png
 var assets embed.FS
 
 // YMPlayer wraps the YM player for Ebiten audio
@@ -214,7 +215,6 @@ type Game struct {
 	backdrop  *ebiten.Image
 	mountains *ebiten.Image
 	font1     *ebiten.Image
-	fontIn    *ebiten.Image
 	fontOut   *ebiten.Image
 	sphere    *ebiten.Image
 	shadows   [4]*ebiten.Image
@@ -222,11 +222,11 @@ type Game struct {
 	// Canvas virtuels
 	chessboard     *ebiten.Image
 	chessboardMask *ebiten.Image
+	whitePixel     *ebiten.Image
 	theCanvas      *ebiten.Image
 	scrollCanvas1  *ebiten.Image
 	scrollCanvas2  *ebiten.Image
 	scrollCanvas3  *ebiten.Image
-	scrollCanvas4  *ebiten.Image
 	scrollCanvas5  *ebiten.Image
 
 	// Variables d'animation
@@ -250,7 +250,6 @@ type Game struct {
 	text2    string
 	scrollX1 float64
 	scrollX2 float64
-	scrollX3 float64
 
 	// 3D Doc animation
 	currentRadians             float64
@@ -261,6 +260,10 @@ type Game struct {
 	audioContext *audio.Context
 	audioPlayer  *audio.Player
 	ymPlayer     *YMPlayer
+	audioReady   bool
+
+	// Surface fixe de la démo, centrée dans les écrans larges.
+	sceneCanvas *ebiten.Image
 
 	// Phases
 	jump bool
@@ -339,79 +342,79 @@ func (g *Game) Init() error {
 	// Charger les images
 	g.backdrop, err = g.loadImage("assets/backdrop.png")
 	if err != nil {
-		return fmt.Errorf("failed to load backdrop: %v", err)
+		return fmt.Errorf("load backdrop: %w", err)
 	}
 
 	g.mountains, err = g.loadImage("assets/mountains.png")
 	if err != nil {
-		return fmt.Errorf("failed to load mountains: %v", err)
+		return fmt.Errorf("load mountains: %w", err)
 	}
 
 	g.font1, err = g.loadImage("assets/kh6.png")
 	if err != nil {
-		return fmt.Errorf("failed to load font1: %v", err)
-	}
-
-	g.fontIn, err = g.loadImage("assets/font_in.png")
-	if err != nil {
-		return fmt.Errorf("failed to load fontIn: %v", err)
+		return fmt.Errorf("load intro font: %w", err)
 	}
 
 	g.fontOut, err = g.loadImage("assets/font_out.png")
 	if err != nil {
-		return fmt.Errorf("failed to load fontOut: %v", err)
+		return fmt.Errorf("load scroller font: %w", err)
 	}
 
 	g.sphere, err = g.loadImage("assets/ball.png")
 	if err != nil {
-		return fmt.Errorf("failed to load sphere: %v", err)
+		return fmt.Errorf("load sphere: %w", err)
 	}
 
 	// Charger les ombres
 	for i := 0; i < 4; i++ {
 		g.shadows[i], err = g.loadImage(fmt.Sprintf("assets/shadow%d.png", i+1))
 		if err != nil {
-			return fmt.Errorf("failed to load shadow%d: %v", i+1, err)
+			return fmt.Errorf("load shadow%d: %w", i+1, err)
 		}
 	}
 
 	// Créer les canvas virtuels
 	g.chessboard = ebiten.NewImage(320, 80)
 	g.chessboardMask = ebiten.NewImage(320, 80)
+	g.whitePixel = ebiten.NewImage(1, 1)
+	g.whitePixel.Fill(color.White)
 	g.theCanvas = ebiten.NewImage(384, 270)
 	g.scrollCanvas1 = ebiten.NewImage(768, 50)
 	g.scrollCanvas2 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
 	g.scrollCanvas3 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
-	g.scrollCanvas4 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
 	g.scrollCanvas5 = ebiten.NewImage(1024, 120) // Plus large pour les déformations
 
 	// Précalculer les valeurs de scroll
 	g.precalcScrollX()
 
-	// Initialiser l'audio
+	g.sceneCanvas = ebiten.NewImage(screenWidth, screenHeight)
+
+	return nil
+}
+
+// initAudio ouvre le périphérique audio une fois la boucle Ebitengine active.
+// Sur Android, le contexte natif n'est pas encore prêt pendant mobile.SetGame.
+func (g *Game) initAudio() error {
 	g.audioContext = audio.NewContext(sampleRate)
 
-	// Charger la musique YM
 	musicData, err := assets.ReadFile("assets/music.ym")
 	if err != nil {
-		fmt.Printf("Music not found (optional): %v\n", err)
-	} else {
-		// Créer le lecteur YM
-		g.ymPlayer, err = NewYMPlayer(musicData, sampleRate, true)
-		if err != nil {
-			return fmt.Errorf("failed to create YM player: %v", err)
-		}
-
-		// Créer le lecteur audio
-		g.audioPlayer, err = g.audioContext.NewPlayer(g.ymPlayer)
-		if err != nil {
-			g.ymPlayer.Close()
-			g.ymPlayer = nil
-			return fmt.Errorf("failed to create audio player: %v", err)
-		}
-
-		g.audioPlayer.Play()
+		return fmt.Errorf("music not found: %w", err)
 	}
+
+	g.ymPlayer, err = NewYMPlayer(musicData, sampleRate, true)
+	if err != nil {
+		return fmt.Errorf("create YM player: %w", err)
+	}
+
+	g.audioPlayer, err = g.audioContext.NewPlayer(g.ymPlayer)
+	if err != nil {
+		_ = g.ymPlayer.Close()
+		g.ymPlayer = nil
+		return fmt.Errorf("create audio player: %w", err)
+	}
+
+	g.audioPlayer.Play()
 
 	return nil
 }
@@ -607,47 +610,51 @@ func (g *Game) drawScroller(screen *ebiten.Image) {
 }
 
 // drawQuad dessine un quadrilatère rempli
-func drawQuad(img *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 float64, c color.Color) {
+func drawQuad(img, whitePixel *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 float64, c color.RGBA) {
+	red := float32(c.R) / 255
+	green := float32(c.G) / 255
+	blue := float32(c.B) / 255
+	alpha := float32(c.A) / 255
 	vertices := []ebiten.Vertex{
 		{
 			DstX:   float32(x1),
 			DstY:   float32(y1),
 			SrcX:   0,
 			SrcY:   0,
-			ColorR: float32(c.(color.RGBA).R) / 255,
-			ColorG: float32(c.(color.RGBA).G) / 255,
-			ColorB: float32(c.(color.RGBA).B) / 255,
-			ColorA: float32(c.(color.RGBA).A) / 255,
+			ColorR: red,
+			ColorG: green,
+			ColorB: blue,
+			ColorA: alpha,
 		},
 		{
 			DstX:   float32(x2),
 			DstY:   float32(y2),
 			SrcX:   0,
 			SrcY:   0,
-			ColorR: float32(c.(color.RGBA).R) / 255,
-			ColorG: float32(c.(color.RGBA).G) / 255,
-			ColorB: float32(c.(color.RGBA).B) / 255,
-			ColorA: float32(c.(color.RGBA).A) / 255,
+			ColorR: red,
+			ColorG: green,
+			ColorB: blue,
+			ColorA: alpha,
 		},
 		{
 			DstX:   float32(x3),
 			DstY:   float32(y3),
 			SrcX:   0,
 			SrcY:   0,
-			ColorR: float32(c.(color.RGBA).R) / 255,
-			ColorG: float32(c.(color.RGBA).G) / 255,
-			ColorB: float32(c.(color.RGBA).B) / 255,
-			ColorA: float32(c.(color.RGBA).A) / 255,
+			ColorR: red,
+			ColorG: green,
+			ColorB: blue,
+			ColorA: alpha,
 		},
 		{
 			DstX:   float32(x4),
 			DstY:   float32(y4),
 			SrcX:   0,
 			SrcY:   0,
-			ColorR: float32(c.(color.RGBA).R) / 255,
-			ColorG: float32(c.(color.RGBA).G) / 255,
-			ColorB: float32(c.(color.RGBA).B) / 255,
-			ColorA: float32(c.(color.RGBA).A) / 255,
+			ColorR: red,
+			ColorG: green,
+			ColorB: blue,
+			ColorA: alpha,
 		},
 	}
 
@@ -656,10 +663,7 @@ func drawQuad(img *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 float64, c color
 	op := &ebiten.DrawTrianglesOptions{}
 	op.FillRule = ebiten.FillAll
 
-	white := ebiten.NewImage(1, 1)
-	white.Fill(color.White)
-
-	img.DrawTriangles(vertices, indices, white, op)
+	img.DrawTriangles(vertices, indices, whitePixel, op)
 }
 
 // drawChessboard dessine le damier avec perspective
@@ -685,7 +689,7 @@ func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
 		x2 := 8 + float64(i)*32 + g.xMove
 		x3 := -752 + float64(i)*192 + g.xMove*6
 		x4 := -848 + float64(i)*192 + g.xMove*6
-		drawQuad(g.chessboard, x1, 0, x2, 0, x3, 80, x4, 80, chessColor)
+		drawQuad(g.chessboard, g.whitePixel, x1, 0, x2, 0, x3, 80, x4, 80, chessColor)
 	}
 
 	// 2. Dessiner les bandes horizontales sur le masque
@@ -700,10 +704,9 @@ func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
 	for i := -2; i < 8; i++ {
 		y1 := -20 + (g.fov/(g.fov+float64(2*i)*32-g.yMove))*50
 		y2 := -20 + (g.fov/(g.fov+float64(2*i)*32+32-g.yMove))*50
-		drawQuad(g.chessboardMask, 0, y1, 320, y1, 320, y2, 0, y2, chessColor)
+		drawQuad(g.chessboardMask, g.whitePixel, 0, y1, 320, y1, 320, y2, 0, y2, chessColor)
 	}
 
-	// 3. Appliquer le masque sur le canvas du damier avec l'opération XOR
 	// 3. Appliquer le masque sur le canvas du damier avec l'opération XOR
 	op := &ebiten.DrawImageOptions{}
 	op.CompositeMode = ebiten.CompositeModeXor
@@ -861,6 +864,14 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 
 // Update met à jour l'état du jeu
 func (g *Game) Update() error {
+	if !g.audioReady {
+		g.audioReady = true
+		if err := g.initAudio(); err != nil {
+			// La musique est facultative : la démo visuelle doit continuer.
+			log.Printf("audio disabled: %v", err)
+		}
+	}
+
 	// Contrôle du volume avec les touches haut/bas
 	if g.ymPlayer != nil {
 		if ebiten.IsKeyPressed(ebiten.KeyUp) {
@@ -899,7 +910,8 @@ func (g *Game) Update() error {
 
 // Draw dessine le jeu
 func (g *Game) Draw(screen *ebiten.Image) {
-	screen.Fill(color.Black)
+	scene := g.sceneCanvas
+	scene.Fill(color.Black)
 
 	if !g.jump {
 		// Phase d'intro
@@ -908,17 +920,17 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(0, 62)
-		screen.DrawImage(g.scrollCanvas1, op)
+		scene.DrawImage(g.scrollCanvas1, op)
 	} else {
 		// Scène principale
 
 		// 1. Dessiner le fond avec le scale original
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(77, 1)
-		screen.DrawImage(g.backdrop, op)
+		scene.DrawImage(g.backdrop, op)
 
 		// 2. Dessiner les montagnes
-		screen.DrawImage(g.mountains, nil)
+		scene.DrawImage(g.mountains, nil)
 
 		// 3. Préparer le damier sur le canvas intermédiaire
 		g.theCanvas.Clear()
@@ -926,21 +938,41 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		// 4. Dessiner le canvas intermédiaire sur l'écran final avec transformation
 		op = &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(2, 2.6) // Agrandissement
+		op.GeoM.Scale(2, 2.6)      // Agrandissement
 		op.GeoM.Translate(0, -128) // Décalage
-		screen.DrawImage(g.theCanvas, op)
+		scene.DrawImage(g.theCanvas, op)
 
 		// 5. Dessiner le scroller avec effets
-		g.drawScroller(screen)
+		g.drawScroller(scene)
 
 		// 6. Dessiner les sphères 3D en tout dernier
-		g.drawDoc(screen)
+		g.drawDoc(scene)
 	}
+
+	screen.Fill(color.Black)
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Translate(float64((screen.Bounds().Dx()-screenWidth)/2), 0)
+	screen.DrawImage(scene, op)
 }
 
 // Layout définit la taille de l'écran
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return screenWidth, screenHeight
+	return logicalWidth(outsideWidth, outsideHeight), screenHeight
+}
+
+func logicalWidth(outsideWidth, outsideHeight int) int {
+	if outsideWidth <= 0 || outsideHeight <= 0 {
+		return screenWidth
+	}
+
+	width := (outsideWidth*screenHeight + outsideHeight - 1) / outsideHeight
+	if width < screenWidth {
+		return screenWidth
+	}
+	if width > 1280 {
+		return 1280
+	}
+	return width
 }
 
 // Cleanup nettoie les ressources
@@ -952,23 +984,5 @@ func (g *Game) Cleanup() {
 	if g.ymPlayer != nil {
 		g.ymPlayer.Close()
 		g.ymPlayer = nil
-	}
-}
-
-func main() {
-	game := NewGame()
-
-	if err := game.Init(); err != nil {
-		log.Fatal(err)
-	}
-
-	ebiten.SetWindowSize(screenWidth, screenHeight)
-	ebiten.SetWindowTitle("TCB 3D DOC Demo - Go/Ebiten")
-
-	// Assurer le nettoyage à la sortie
-	defer game.Cleanup()
-
-	if err := ebiten.RunGame(game); err != nil {
-		log.Fatal(err)
 	}
 }
