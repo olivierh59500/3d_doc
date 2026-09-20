@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	kit "github.com/olivierh59500/democonstructionkit"
+	"github.com/olivierh59500/democonstructionkit/composite"
+	"github.com/olivierh59500/democonstructionkit/scrolling"
 	"image"
 	"image/color"
 	_ "image/png"
@@ -206,6 +209,7 @@ type Anim struct {
 
 // Game représente l'état du jeu
 type Game struct {
+	scrollPrograms map[*[glyphCount]*ebiten.Image]*scrolling.Scrolling
 	// Images
 	backdrop       *ebiten.Image
 	mountains      *ebiten.Image
@@ -483,65 +487,60 @@ func (g *Game) drawChar(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, ch
 
 // drawScrollText dessine un texte défilant
 func (g *Game) drawScrollText(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, text string, scrollX float64) {
-	charSpacing := float64(fontWidth)
-	startChar := int(scrollX / charSpacing)
-	offset := math.Mod(scrollX, charSpacing)
-
-	// Calculer combien de caractères on peut afficher sur toute la largeur
-	maxChars := int(float64(dst.Bounds().Dx())/charSpacing) + 3
-
-	for i := 0; i < maxChars; i++ {
-		charIndex := (startChar + i) % len(text)
-		if charIndex < 0 {
-			charIndex += len(text)
-		}
-
-		x := float64(i)*charSpacing - offset
-		if x >= -charSpacing && x < float64(dst.Bounds().Dx())+charSpacing {
-			g.drawChar(dst, glyphs, text[charIndex], x, 0, 1)
-		}
+	if len(text) == 0 {
+		return
 	}
+	if g.scrollPrograms == nil {
+		g.scrollPrograms = map[*[glyphCount]*ebiten.Image]*scrolling.Scrolling{}
+	}
+	program := g.scrollPrograms[glyphs]
+	if program == nil {
+		images := make([]*ebiten.Image, len(text))
+		for i := range text {
+			images[i] = glyphs[glyphIndex(text[i])]
+		}
+		var err error
+		program, err = scrolling.FromImages(images, fontWidth)
+		if err != nil {
+			panic(err)
+		}
+		g.scrollPrograms[glyphs] = program
+	}
+	width := float64(fontWidth)
+	first := int(scrollX / width)
+	offset := math.Mod(scrollX, width)
+	state := scrolling.IdentityState()
+	state.X = -offset - float64(first)*width
+	state.First = first
+	state.End = first + int(float64(dst.Bounds().Dx())/width) + 3
+	state.Cycle = true
+	state.Map = func(s scrolling.Sample, op *ebiten.DrawImageOptions) bool {
+		return s.X >= -width && s.X < float64(dst.Bounds().Dx())+width
+	}
+	program.DrawAt(dst, state)
 }
 
 // drawScroller dessine le scroller avec effets
 func (g *Game) drawScroller(screen *ebiten.Image) {
-	// Clear canvases
 	g.scrollCanvas2.Clear()
 	g.scrollCanvas3.Clear()
 	g.scrollCanvas5.Clear()
-
-	// Dessiner le texte sur le canvas élargi
 	g.drawScrollText(g.scrollCanvas2, &g.scrollerGlyphs, g.text2, g.scrollX2)
-
-	// Effet de vague sur le scroller
-	for j := 0; j < scrollerRows; j++ {
-		dstX := g.scrollX[(g.vbl3+j)%g.scrollXMod]
-
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Translate(dstX, float64(j*2))
-		g.scrollCanvas3.DrawImage(g.scrollRows2[j], op)
-	}
-
-	// Effet de rebond vertical
-	// yOffset varie de 0 à 60 (30 + 30*cos)
+	frame := kit.Frame{Tick: uint64(g.vbl3)}
+	composite.Strips{Thickness: 2, Count: scrollerRows, Map: func(i int, r image.Rectangle, f kit.Frame) composite.Strip {
+		op := ebiten.DrawImageOptions{}
+		op.GeoM.Translate(g.scrollX[(int(f.Tick)+i)%g.scrollXMod], float64(i*2))
+		return composite.Strip{Source: g.scrollRows2[i].Bounds(), Options: op}
+	}}.Draw(g.scrollCanvas3, g.scrollCanvas2, frame)
 	yOffset := 30 + 30*math.Cos(g.vbl4/20)
-
-	// On dessine le scroller avec un décalage vertical
-	for j := 0; j < scrollerRows; j++ {
-		dstX := g.scrollX[(g.vbl3+j)%g.scrollXMod]
-
-		// Position verticale avec l'effet de rebond
-		dstY := float64(j*2) + yOffset
-
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Translate(dstX, dstY)
-		g.scrollCanvas5.DrawImage(g.scrollRows3[j], op)
-	}
-
-	// Dessiner le résultat final directement sur l'écran
-	op := &ebiten.DrawImageOptions{}
+	composite.Strips{Thickness: 2, Count: scrollerRows, Map: func(i int, r image.Rectangle, f kit.Frame) composite.Strip {
+		op := ebiten.DrawImageOptions{}
+		op.GeoM.Translate(g.scrollX[(int(f.Tick)+i)%g.scrollXMod], float64(i*2)+yOffset)
+		return composite.Strip{Source: g.scrollRows3[i].Bounds(), Options: op}
+	}}.Draw(g.scrollCanvas5, g.scrollCanvas3, frame)
+	op := ebiten.DrawImageOptions{}
 	op.GeoM.Translate(0, 62)
-	screen.DrawImage(g.scrollVisible, op)
+	composite.Instance{Image: g.scrollVisible, Options: op}.Draw(screen)
 }
 
 func (g *Game) resetQuadBatch() {
