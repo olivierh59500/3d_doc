@@ -1,6 +1,9 @@
 package threeddoc
 
-import "testing"
+import (
+	"github.com/olivierh59500/democonstructionkit/presets"
+	"testing"
+)
 
 func legacyglyphIndex(char byte) int {
 	switch {
@@ -35,8 +38,16 @@ func legacyglyphIndex(char byte) int {
 	}
 }
 func TestSharedglyphIndexMatchesOriginal(t *testing.T) {
+	lookup, err := presets.TileLookup("3d_doc", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for r := 0; r < 256; r++ {
-		if got, want := glyphIndex(byte(r)), legacyglyphIndex(byte(r)); got != want {
+		got, ok := lookup(rune(byte(r)))
+		if !ok {
+			got = 0
+		}
+		if want := legacyglyphIndex(byte(r)); got != want {
 			t.Fatalf("rune %U: got %d, want %d", r, got, want)
 		}
 	}

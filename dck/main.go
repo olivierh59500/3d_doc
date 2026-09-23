@@ -13,7 +13,6 @@ import (
 	"image/color"
 
 	kit "github.com/olivierh59500/democonstructionkit"
-	"github.com/olivierh59500/democonstructionkit/composite"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
 
 	_ "image/png"
@@ -44,12 +43,12 @@ const (
 var assets = originalassets.
 	DCKAssetAssets()
 
-// Vec3 représente un vecteur 3D
+// Vec3 is a three-dimensional vector
 type Vec3 struct {
 	X, Y, Z float64
 }
 
-// RotateY effectue une rotation autour de l'axe Y
+// RotateY rotates around the Y axis
 func (v *Vec3) RotateY(r float64) {
 	z2 := v.Z*math.Cos(r) - v.X*math.Sin(r)
 	x2 := v.Z*math.Sin(r) + v.X*math.Cos(r)
@@ -57,12 +56,12 @@ func (v *Vec3) RotateY(r float64) {
 	v.X = x2
 }
 
-// Sprite représente un sprite projeté en 3D
+// Sprite stores a projected three-dimensional sprite
 type Sprite struct {
 	U, V, W, Z float64
 }
 
-// NewSprite crée un sprite projeté depuis un point 3D
+// NewSprite projects a three-dimensional point into a sprite
 func NewSprite(p Vec3, focalLength float64, canvasWidth, canvasHeight int) Sprite {
 	centerX := float64(canvasWidth) / 2
 	centerY := float64(canvasHeight)/2 + 40
@@ -76,7 +75,7 @@ func NewSprite(p Vec3, focalLength float64, canvasWidth, canvasHeight int) Sprit
 	}
 }
 
-// Anim représente les paramètres d'animation
+// Anim stores movement parameters
 type Anim struct {
 	SpinSpeed                float64
 	Displace                 float64
@@ -84,37 +83,26 @@ type Anim struct {
 	RadiusFromCenterOfScreen float64
 }
 
-// Game représente l'état du jeu
+// Game owns the production scene state
 type Game struct {
-	scrollPrograms map[*[glyphCount]*ebiten.Image]*scrolling.Scrolling
+	introScroll, mainScroll *scrolling.Scrolling
 	// Images
-	backdrop       *ebiten.Image
-	mountains      *ebiten.Image
-	introGlyphs    [glyphCount]*ebiten.Image
-	scrollerGlyphs [glyphCount]*ebiten.Image
-	sphere         *ebiten.Image
-	shadows        [4]*ebiten.Image
+	backdrop  *ebiten.Image
+	mountains *ebiten.Image
+	sphere    *ebiten.Image
+	shadows   [4]*ebiten.Image
 
-	// Canvas virtuels
+	// Working canvases
 	chessboard     *ebiten.Image
 	chessboardMask *ebiten.Image
 	whitePixel     *ebiten.Image
 	theCanvas      *ebiten.Image
-	scrollCanvas1  *ebiten.Image
-	scrollCanvas2  *ebiten.Image
-	scrollCanvas3  *ebiten.Image
-	scrollCanvas5  *ebiten.Image
-	scrollRows2    [scrollerRows]*ebiten.Image
-	scrollRows3    [scrollerRows]*ebiten.Image
-	scrollVisible  *ebiten.Image
 	quadVertices   []ebiten.Vertex
 	quadIndices    []uint16
 
-	// Variables d'animation
+	// Animation state
 	vbl   float64
 	vbl2  float64
-	vbl3  int
-	vbl4  float64
 	xMove float64
 	yMove float64
 	xm    float64
@@ -122,15 +110,9 @@ type Game struct {
 	fov   float64
 	speed float64
 
-	// Scroll precalc
-	scrollX    []float64
-	scrollXMod int
-
 	// Scrolltext
-	text1    string
-	text2    string
-	scrollX1 float64
-	scrollX2 float64
+	text1 string
+	text2 string
 
 	// 3D Doc animation
 	currentRadians             float64
@@ -144,14 +126,14 @@ type Game struct {
 	musicStream  *sound.Stream
 	audioReady   bool
 
-	// Surface fixe de la démo, centrée dans les écrans larges.
+	// Fixed demo surface centered on wide displays.
 	sceneCanvas *ebiten.Image
 
-	// Phases
+	// Scene phases
 	jump bool
 }
 
-// NewGame crée une nouvelle instance du jeu
+// NewGame constructs an independent game instance
 func NewGame() *Game {
 	g := &Game{
 		xm:                         0,
@@ -161,14 +143,14 @@ func NewGame() *Game {
 		overWriteFirstTwoWaveforms: true,
 	}
 
-	// Textes
+	// Messages
 	g.text1 = "               BILIZIR FROM DMA HAVE DONE IT AGAIN: A NEW GOLANG/EBITEN CONVERSION, THIS TIME THIS IS THE 3D-DOC FROM TCB    \\          "
 	g.text2 = "                          BILIZIR IS PROUD TO PRESENT THE CONVERSION OF THE 3D-DOC DEMO!    THIS SCREEN WAS ORIGINALLY RELEASED IN TCB'S CUDDLY DEMOS ON ATARI ST A LONG TIME AGO...  HERE IT'S THE GOLANG VERSION OF THE 3D-DOC WELL IT'S A FREE ADAPTATION :)   GREETINGS TO ALL MEMBERS OF DMA AND THE UNION... LET'S WRAP!   "
 
 	return g
 }
 
-// loadImage charge une image depuis les assets
+// loadImage decodes a bundled image
 func (g *Game) loadImage(path string) (*ebiten.Image, error) {
 	data, err := assets.ReadFile(path)
 	if err != nil {
@@ -183,54 +165,11 @@ func (g *Game) loadImage(path string) (*ebiten.Image, error) {
 	return ebiten.NewImageFromImage(img), nil
 }
 
-func splitFont(font *ebiten.Image) [glyphCount]*ebiten.Image {
-	var glyphs [glyphCount]*ebiten.Image
-	images, err := scrolling.GridImages(font, image.Pt(fontWidth, fontHeight), 10, glyphCount)
-	if err != nil {
-		panic(err)
-	}
-	copy(glyphs[:], images)
-	return glyphs
-}
-
-// precalcScrollX précalcule les valeurs de déplacement du scroll
-func (g *Game) precalcScrollX() {
-	g.scrollX = make([]float64, 0, 1024)
-
-	// Premier pattern
-	stp1 := 7.0 / 180.0 * math.Pi
-	stp2 := 3.0 / 180.0 * math.Pi
-	for i := 0; i < 389; i++ {
-		g.scrollX = append(g.scrollX, 20*math.Sin(float64(i)*stp1)+30*math.Cos(float64(i)*stp2))
-	}
-
-	// Deuxième pattern
-	stp1 = 8.0 / 180.0 * math.Pi
-	for i := 0; i < 68; i++ {
-		g.scrollX = append(g.scrollX, 30*math.Sin(float64(i)*stp1))
-	}
-
-	// Répétition du premier pattern
-	stp1 = 7.0 / 180.0 * math.Pi
-	stp2 = 3.0 / 180.0 * math.Pi
-	for i := 0; i < 389; i++ {
-		g.scrollX = append(g.scrollX, 20*math.Sin(float64(i)*stp1)+30*math.Cos(float64(i)*stp2))
-	}
-
-	// Dernier pattern
-	stp1 = 8.0 / 180.0 * math.Pi
-	for i := 0; i < 189; i++ {
-		g.scrollX = append(g.scrollX, 30*math.Sin(float64(i)*stp1))
-	}
-
-	g.scrollXMod = len(g.scrollX)
-}
-
-// Init initialise les ressources
+// Init constructs the graphics resources
 func (g *Game) Init() error {
 	var err error
 
-	// Charger les images
+	// Load images
 	g.backdrop, err = g.loadImage("assets/backdrop.png")
 	if err != nil {
 		return fmt.Errorf("load backdrop: %w", err)
@@ -245,20 +184,36 @@ func (g *Game) Init() error {
 	if err != nil {
 		return fmt.Errorf("load intro font: %w", err)
 	}
-	g.introGlyphs = splitFont(introFont)
+	introAtlas, err := presets.FontAtlas("3d_doc-intro", introFont)
+	if err != nil {
+		return err
+	}
+	introConfig := presets.DOCIntroRowBands(introAtlas, g.text1)
+	g.introScroll, err = scrolling.New(scrolling.Config{RowBands: &introConfig})
+	if err != nil {
+		return err
+	}
 
 	scrollerFont, err := g.loadImage("assets/font_out.png")
 	if err != nil {
 		return fmt.Errorf("load scroller font: %w", err)
 	}
-	g.scrollerGlyphs = splitFont(scrollerFont)
+	scrollerAtlas, err := presets.FontAtlas("3d_doc", scrollerFont)
+	if err != nil {
+		return err
+	}
+	mainConfig := presets.DOCMainRowBands(scrollerAtlas, g.text2)
+	g.mainScroll, err = scrolling.New(scrolling.Config{RowBands: &mainConfig})
+	if err != nil {
+		return err
+	}
 
 	g.sphere, err = g.loadImage("assets/ball.png")
 	if err != nil {
 		return fmt.Errorf("load sphere: %w", err)
 	}
 
-	// Charger les ombres
+	// Load shadow images
 	for i := 0; i < 4; i++ {
 		g.shadows[i], err = g.loadImage(fmt.Sprintf("assets/shadow%d.png", i+1))
 		if err != nil {
@@ -266,35 +221,22 @@ func (g *Game) Init() error {
 		}
 	}
 
-	// Créer les canvas virtuels
+	// Construct working canvases
 	g.chessboard = ebiten.NewImage(320, 80)
 	g.chessboardMask = ebiten.NewImage(320, 80)
 	g.whitePixel = ebiten.NewImage(1, 1)
 	g.whitePixel.Fill(color.White)
 	g.theCanvas = ebiten.NewImage(384, 270)
-	g.scrollCanvas1 = ebiten.NewImage(768, 50)
-	g.scrollCanvas2 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
-	g.scrollCanvas3 = ebiten.NewImage(1024, 50)  // Plus large pour les déformations
-	g.scrollCanvas5 = ebiten.NewImage(1024, 120) // Plus large pour les déformations
-	for row := 0; row < scrollerRows; row++ {
-		srcRect := image.Rect(0, row*2, 1024, (row+1)*2)
-		g.scrollRows2[row] = g.scrollCanvas2.SubImage(srcRect).(*ebiten.Image)
-		g.scrollRows3[row] = g.scrollCanvas3.SubImage(srcRect).(*ebiten.Image)
-	}
-	g.scrollVisible = g.scrollCanvas5.SubImage(image.Rect(128, 0, 896, 120)).(*ebiten.Image)
 	g.quadVertices = make([]ebiten.Vertex, 0, 44)
 	g.quadIndices = make([]uint16, 0, 66)
-
-	// Précalculer les valeurs de scroll
-	g.precalcScrollX()
 
 	g.sceneCanvas = ebiten.NewImage(screenWidth, screenHeight)
 
 	return nil
 }
 
-// initAudio ouvre le périphérique audio une fois la boucle Ebitengine active.
-// Sur Android, le contexte natif n'est pas encore prêt pendant mobile.SetGame.
+// initAudio opens output after the Ebitengine loop becomes active.
+// On Android, the native context is not ready during mobile.SetGame.
 func (g *Game) initAudio() error {
 	g.audioContext = audio.NewContext(sampleRate)
 
@@ -318,81 +260,6 @@ func (g *Game) initAudio() error {
 	g.audioPlayer.Play()
 
 	return nil
-}
-
-var glyphIndex = func() func(byte) int {
-	lookup, err := presets.TileLookup("3d_doc", false)
-	if err != nil {
-		panic(err)
-	}
-	return func(ch byte) int { index, _ := lookup(rune(ch)); return index }
-}()
-
-// drawChar dessine un caractère de la font.
-func (g *Game) drawChar(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, char byte, x, y, scale float64) {
-
-	op := &ebiten.DrawImageOptions{}
-	op.GeoM.Scale(scale, scale)
-	op.GeoM.Translate(x, y)
-	dst.DrawImage(glyphs[glyphIndex(char)], op)
-}
-
-// drawScrollText dessine un texte défilant
-func (g *Game) drawScrollText(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, text string, scrollX float64) {
-	if len(text) == 0 {
-		return
-	}
-	if g.scrollPrograms == nil {
-		g.scrollPrograms = map[*[glyphCount]*ebiten.Image]*scrolling.Scrolling{}
-	}
-	program := g.scrollPrograms[glyphs]
-	if program == nil {
-		images := make([]*ebiten.Image, len(text))
-		for i := range text {
-			images[i] = glyphs[glyphIndex(text[i])]
-		}
-		var err error
-		program, err = scrolling.FromImages(images, fontWidth)
-		if err != nil {
-			panic(err)
-		}
-		g.scrollPrograms[glyphs] = program
-	}
-	width := float64(fontWidth)
-	first := int(scrollX / width)
-	offset := math.Mod(scrollX, width)
-	state := scrolling.IdentityState()
-	state.X = -offset - float64(first)*width
-	state.First = first
-	state.End = first + int(float64(dst.Bounds().Dx())/width) + 3
-	state.Cycle = true
-	state.Map = func(s scrolling.Sample, op *ebiten.DrawImageOptions) bool {
-		return s.X >= -width && s.X < float64(dst.Bounds().Dx())+width
-	}
-	program.DrawAt(dst, state)
-}
-
-// drawScroller dessine le scroller avec effets
-func (g *Game) drawScroller(screen *ebiten.Image) {
-	g.scrollCanvas2.Clear()
-	g.scrollCanvas3.Clear()
-	g.scrollCanvas5.Clear()
-	g.drawScrollText(g.scrollCanvas2, &g.scrollerGlyphs, g.text2, g.scrollX2)
-	frame := kit.Frame{Tick: uint64(g.vbl3)}
-	composite.Strips{Thickness: 2, Count: scrollerRows, Map: func(i int, r image.Rectangle, f kit.Frame) composite.Strip {
-		op := ebiten.DrawImageOptions{}
-		op.GeoM.Translate(g.scrollX[(int(f.Tick)+i)%g.scrollXMod], float64(i*2))
-		return composite.Strip{Source: g.scrollRows2[i].Bounds(), Options: op}
-	}}.Draw(g.scrollCanvas3, g.scrollCanvas2, frame)
-	yOffset := 30 + 30*math.Cos(g.vbl4/20)
-	composite.Strips{Thickness: 2, Count: scrollerRows, Map: func(i int, r image.Rectangle, f kit.Frame) composite.Strip {
-		op := ebiten.DrawImageOptions{}
-		op.GeoM.Translate(g.scrollX[(int(f.Tick)+i)%g.scrollXMod], float64(i*2)+yOffset)
-		return composite.Strip{Source: g.scrollRows3[i].Bounds(), Options: op}
-	}}.Draw(g.scrollCanvas5, g.scrollCanvas3, frame)
-	op := ebiten.DrawImageOptions{}
-	op.GeoM.Translate(0, 62)
-	composite.Instance{Image: g.scrollVisible, Options: op}.Draw(screen)
 }
 
 func (g *Game) resetQuadBatch() {
@@ -457,17 +324,17 @@ func (g *Game) drawQuadBatch(destination *ebiten.Image) {
 	destination.DrawTriangles(g.quadVertices, g.quadIndices, g.whitePixel, op)
 }
 
-// drawChessboard dessine le damier avec perspective
+// drawChessboard renders the perspective checkerboard
 func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
-	// La couleur des bandes du damier
+	// Checkerboard stripe color
 	chessColor := color.RGBA{R: 136, G: 0, B: 136, A: 255} // #880088
 
-	// Vider les canvas de travail
+	// Clear the working surfaces
 	g.chessboard.Clear()
 	g.chessboardMask.Clear()
 	g.resetQuadBatch()
 
-	// 1. Dessiner les bandes verticales sur le canvas principal du damier
+	// 1. Draw vertical strips on the floor surface
 	for i := 0; i < 11; i++ {
 		x1 := -8 + float64(i)*32 + g.xMove
 		x2 := 8 + float64(i)*32 + g.xMove
@@ -477,7 +344,7 @@ func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
 	}
 	g.drawQuadBatch(g.chessboard)
 
-	// 2. Dessiner les bandes horizontales sur le masque
+	// 2. Draw horizontal strips into the mask
 	g.resetQuadBatch()
 	for i := -2; i < 8; i++ {
 		y1 := -20 + (g.fov/(g.fov+float64(2*i)*32-g.yMove))*50
@@ -486,20 +353,20 @@ func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
 	}
 	g.drawQuadBatch(g.chessboardMask)
 
-	// 3. Appliquer le masque sur le canvas du damier avec l'opération XOR
+	// 3. Combine the mask with the floor using XOR
 	op := &ebiten.DrawImageOptions{}
 	op.CompositeMode = ebiten.CompositeModeXor
 	g.chessboard.DrawImage(g.chessboardMask, op)
 
-	// 4. Dessiner le damier final sur le canvas de destination
+	// 4. Draw the completed floor on the destination
 	drawOp := &ebiten.DrawImageOptions{}
 	drawOp.GeoM.Translate(32, 149)
 	destinationCanvas.DrawImage(g.chessboard, drawOp)
 }
 
-// getMovement retourne les paramètres d'animation selon l'index
+// getMovement selects an authored movement program
 func getMovement(index int, t float64, i int) Anim {
-	// Toujours éviter les animations 0 et 1 après le début
+	// Skip entrance programs zero and one after the opening
 	if index < 2 && t > 21 { // Après 3 cycles de 7 secondes
 		index = 2 + int(t/7)%6 // Boucler sur les animations 2-7
 	}
@@ -520,12 +387,12 @@ func getMovement(index int, t float64, i int) Anim {
 	case 7:
 		return Anim{-8, 10 - math.Abs(math.Sin((t*0.6+float64(i)*0.05)*1.75)*70)*2.3, 20, 150}
 	default:
-		// Pour les indices > 7, boucler sur les mouvements 2-7
+		// Loop programs two through seven for later indices
 		return getMovement(2+(index-2)%6, t, i)
 	}
 }
 
-// blendAnim mélange deux animations
+// blendAnim interpolates two movement poses
 func blendAnim(a, b Anim, alpha float64) Anim {
 	return Anim{
 		SpinSpeed:                a.SpinSpeed*(1-alpha) + b.SpinSpeed*alpha,
@@ -565,7 +432,7 @@ func (g *Game) updateDocAnimation() {
 	}
 }
 
-// drawDoc dessine les sphères 3D animées
+// drawDoc renders the animated projected balls
 func (g *Game) drawDoc(screen *ebiten.Image) {
 	t := g.elapsedSeconds
 	var balls [4]Sprite
@@ -574,26 +441,26 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 	for i := 0; i < 4; i++ {
 		anim := g.currentMovement(t, i)
 
-		// Créer la position de base sur le cercle
+		// Place the point on its base circle
 		currentPos := Vec3{X: anim.RadiusFromCenterOfScreen, Y: 0, Z: 0}
 		currentPos.RotateY(math.Pi * 2 / 360 * anim.BallLineDisplacement * float64(i))
 
-		// Ajouter le déplacement vertical
+		// Add vertical motion
 		d := Vec3{X: 0, Y: anim.Displace, Z: 0}
 		p := Vec3{X: currentPos.X + d.X, Y: currentPos.Y + d.Y, Z: currentPos.Z + d.Z}
 
 		p.RotateY(g.docRadians[i])
 
-		// Position de l'ombre (au sol)
+		// Place the shadow on the floor
 		ps := Vec3{X: p.X, Y: 60, Z: p.Z}
 
-		// Créer les sprites pour la boule et son ombre
+		// Build the ball and shadow sprites
 		balls[i] = NewSprite(p, focalLength, screenWidth, screenHeight)
 		ballShadows[i] = NewSprite(ps, focalLength, screenWidth, screenHeight)
 	}
 
-	// Trier par profondeur Z (plus loin en premier)
-	// Créer des indices pour maintenir la correspondance boule/ombre
+	// Sort by depth, farthest first
+	// Keep matching ball and shadow indices
 	indices := [4]int{0, 1, 2, 3}
 	for i := 0; i < 3; i++ {
 		for j := i + 1; j < 4; j++ {
@@ -603,7 +470,7 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 		}
 	}
 
-	// Dessiner les ombres d'abord (dans l'ordre de profondeur)
+	// Draw shadows first in depth order
 	for _, idx := range indices {
 		shadowColor := int(((ballShadows[idx].W - 0.5) * 10) / 2)
 		shadowColor = 3 - max(0, min(3, shadowColor))
@@ -619,7 +486,7 @@ func (g *Game) drawDoc(screen *ebiten.Image) {
 		screen.DrawImage(g.shadows[shadowColor], op)
 	}
 
-	// Dessiner les sphères (dans l'ordre de profondeur)
+	// Draw balls in depth order
 	for _, idx := range indices {
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(balls[idx].W, balls[idx].W)
@@ -639,14 +506,7 @@ func wrap(value, period float64) float64 {
 	return value
 }
 
-func advanceScroll(position, speed float64, text string) float64 {
-	if len(text) == 0 {
-		return 0
-	}
-	return wrap(position+speed, float64(len(text)*fontWidth))
-}
-
-func (g *Game) updateMainAnimation() {
+func (g *Game) updateMainAnimation() error {
 	g.speed = -math.Cos(g.vbl / 40)
 	g.vbl += 0.16
 	g.xm = 128 * math.Cos(g.vbl2/40)
@@ -654,23 +514,24 @@ func (g *Game) updateMainAnimation() {
 
 	g.xMove = wrap(g.xMove+g.xm*g.speed*0.01, 32)
 	g.yMove = wrap(g.yMove+g.ym*g.speed*0.032, 64)
-	g.scrollX2 = advanceScroll(g.scrollX2, 3, g.text2)
-	g.vbl4 += 1.2
-	g.vbl3 = (g.vbl3 + 1) % g.scrollXMod
+	if err := g.mainScroll.Update(kit.Frame{}); err != nil {
+		return err
+	}
 	g.updateDocAnimation()
+	return nil
 }
 
-// Update met à jour l'état du jeu
+// Update advances the scene once per simulation tick
 func (g *Game) Update() error {
 	if !g.audioReady {
 		g.audioReady = true
 		if err := g.initAudio(); err != nil {
-			// La musique est facultative : la démo visuelle doit continuer.
+			// Audio is optional; the visual scene must keep running.
 			log.Printf("audio disabled: %v", err)
 		}
 	}
 
-	// Contrôle du volume avec les touches haut/bas
+	// Adjust volume with the up and down keys
 	if g.musicStream != nil {
 		if ebiten.IsKeyPressed(ebiten.KeyUp) {
 			vol := g.musicStream.Volume() + 0.01
@@ -690,59 +551,51 @@ func (g *Game) Update() error {
 	g.elapsedSeconds += 1.0 / ebiten.DefaultTPS
 
 	if !g.jump {
-		// Phase d'intro - détecter le caractère '\'
-		charIndex := int(g.scrollX1 / float64(fontWidth))
-		if charIndex < len(g.text1) && g.text1[charIndex] == '\\' {
+		if g.introScroll.CursorRune() == '\\' {
 			g.jump = true
 		}
-		// L'ancienne version avançait de 2 dans Update et de 3 dans Draw.
-		// Conserver le total de 5 par tick rend le rythme indépendant du rafraîchissement.
-		g.scrollX1 = advanceScroll(g.scrollX1, 5, g.text1)
-	} else {
-		g.updateMainAnimation()
+		if err := g.introScroll.Update(kit.Frame{}); err != nil {
+			return err
+		}
+	} else if err := g.updateMainAnimation(); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// Draw dessine le jeu
+// Draw renders the current scene
 func (g *Game) Draw(screen *ebiten.Image) {
 	scene := g.sceneCanvas
 	scene.Fill(color.Black)
 
 	if !g.jump {
-		// Phase d'intro
-		g.scrollCanvas1.Clear()
-		g.drawScrollText(g.scrollCanvas1, &g.introGlyphs, g.text1, g.scrollX1)
-
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Translate(0, 62)
-		scene.DrawImage(g.scrollCanvas1, op)
+		g.introScroll.Draw(scene)
 	} else {
-		// Scène principale
+		// Main scene
 
-		// 1. Dessiner le fond avec le scale original
+		// 1. Draw the background at its authored scale
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(77, 1)
 		scene.DrawImage(g.backdrop, op)
 
-		// 2. Dessiner les montagnes
+		// 2. Draw the mountains
 		scene.DrawImage(g.mountains, nil)
 
-		// 3. Préparer le damier sur le canvas intermédiaire
+		// 3. Prepare the checkerboard on its working surface
 		g.theCanvas.Clear()
 		g.drawChessboard(g.theCanvas)
 
-		// 4. Dessiner le canvas intermédiaire sur l'écran final avec transformation
+		// 4. Composite the floor with the authored transform
 		op = &ebiten.DrawImageOptions{}
 		op.GeoM.Scale(2, 2.6)      // Agrandissement
 		op.GeoM.Translate(0, -128) // Décalage
 		scene.DrawImage(g.theCanvas, op)
 
-		// 5. Dessiner le scroller avec effets
-		g.drawScroller(scene)
+		// 5. Draw the shared animated scroller
+		g.mainScroll.Draw(scene)
 
-		// 6. Dessiner les sphères 3D en tout dernier
+		// 6. Draw the projected balls last
 		g.drawDoc(scene)
 	}
 
@@ -752,7 +605,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	screen.DrawImage(scene, op)
 }
 
-// Layout définit la taille de l'écran
+// Layout selects the logical screen size
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return logicalWidth(outsideWidth, outsideHeight), screenHeight
 }
@@ -772,8 +625,14 @@ func logicalWidth(outsideWidth, outsideHeight int) int {
 	return width
 }
 
-// Cleanup nettoie les ressources
+// Cleanup releases owned resources
 func (g *Game) Cleanup() {
+	if g.introScroll != nil {
+		g.introScroll.Close()
+	}
+	if g.mainScroll != nil {
+		g.mainScroll.Close()
+	}
 	if g.audioPlayer != nil {
 		g.audioPlayer.Close()
 		g.audioPlayer = nil

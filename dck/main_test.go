@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/olivierh59500/democonstructionkit/presets"
 	"github.com/olivierh59500/democonstructionkit/sound"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -32,6 +33,10 @@ func TestLogicalWidth(t *testing.T) {
 }
 
 func TestGlyphIndex(t *testing.T) {
+	lookup, err := presets.TileLookup("3d_doc", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := map[byte]int{
 		' ': 0,
 		'!': 1,
@@ -46,21 +51,13 @@ func TestGlyphIndex(t *testing.T) {
 	}
 
 	for char, want := range tests {
-		if got := glyphIndex(char); got != want {
+		got, ok := lookup(rune(char))
+		if !ok {
+			got = 0
+		}
+		if got != want {
 			t.Errorf("glyphIndex(%q) = %d, want %d", char, got, want)
 		}
-	}
-}
-
-func TestAdvanceScrollWraps(t *testing.T) {
-	if got := advanceScroll(9, 3, "A"); got != 12 {
-		t.Fatalf("advanceScroll before wrap = %v, want 12", got)
-	}
-	if got := advanceScroll(fontWidth-1, 3, "A"); got != 2 {
-		t.Fatalf("advanceScroll after wrap = %v, want 2", got)
-	}
-	if got := advanceScroll(12, 3, ""); got != 0 {
-		t.Fatalf("advanceScroll with empty text = %v, want 0", got)
 	}
 }
 
@@ -117,22 +114,23 @@ func TestDrawDoesNotAdvanceAnimation(t *testing.T) {
 		t.Fatal(err)
 	}
 	game.jump = true
-	game.updateMainAnimation()
+	if err := game.updateMainAnimation(); err != nil {
+		t.Fatal(err)
+	}
 
 	type animationState struct {
-		vbl, vbl2, vbl4         float64
-		vbl3                    int
+		vbl, vbl2               float64
 		xMove, yMove            float64
-		scrollX1, scrollX2      float64
+		introCursor, mainCursor rune
 		currentRadians          float64
 		docRadians              [4]float64
 		overwriteFirstWaveforms bool
 	}
 	snapshot := func() animationState {
 		return animationState{
-			vbl: game.vbl, vbl2: game.vbl2, vbl4: game.vbl4,
-			vbl3: game.vbl3, xMove: game.xMove, yMove: game.yMove,
-			scrollX1: game.scrollX1, scrollX2: game.scrollX2,
+			vbl: game.vbl, vbl2: game.vbl2,
+			xMove: game.xMove, yMove: game.yMove,
+			introCursor: game.introScroll.CursorRune(), mainCursor: game.mainScroll.CursorRune(),
 			currentRadians: game.currentRadians, docRadians: game.docRadians,
 			overwriteFirstWaveforms: game.overWriteFirstTwoWaveforms,
 		}
