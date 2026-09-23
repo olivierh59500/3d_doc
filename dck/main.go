@@ -5,6 +5,7 @@ import (
 	originalassets "3d_doc"
 	"bytes"
 	"fmt"
+	"github.com/olivierh59500/democonstructionkit/effects"
 	"github.com/olivierh59500/democonstructionkit/presets"
 
 	"github.com/olivierh59500/democonstructionkit/sound"
@@ -17,7 +18,6 @@ import (
 
 	_ "image/png"
 	"log"
-	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
@@ -32,56 +32,10 @@ const (
 	glyphCount   = 59
 	scrollerRows = 25
 	sampleRate   = 44100
-	animDuration = 7.0
-	focalLength  = 400.0
-	ballWidth    = 64.0
-	ballHeight   = 64.0
-	shadowWidth  = 64.0
-	shadowHeight = 16.0
 )
 
 var assets = originalassets.
 	DCKAssetAssets()
-
-// Vec3 is a three-dimensional vector
-type Vec3 struct {
-	X, Y, Z float64
-}
-
-// RotateY rotates around the Y axis
-func (v *Vec3) RotateY(r float64) {
-	z2 := v.Z*math.Cos(r) - v.X*math.Sin(r)
-	x2 := v.Z*math.Sin(r) + v.X*math.Cos(r)
-	v.Z = z2
-	v.X = x2
-}
-
-// Sprite stores a projected three-dimensional sprite
-type Sprite struct {
-	U, V, W, Z float64
-}
-
-// NewSprite projects a three-dimensional point into a sprite
-func NewSprite(p Vec3, focalLength float64, canvasWidth, canvasHeight int) Sprite {
-	centerX := float64(canvasWidth) / 2
-	centerY := float64(canvasHeight)/2 + 40
-
-	scale := focalLength / (focalLength + p.Z)
-	return Sprite{
-		U: p.X*scale + centerX,
-		V: p.Y*scale + centerY,
-		W: scale * 0.7,
-		Z: p.Z,
-	}
-}
-
-// Anim stores movement parameters
-type Anim struct {
-	SpinSpeed                float64
-	Displace                 float64
-	BallLineDisplacement     float64
-	RadiusFromCenterOfScreen float64
-}
 
 // Game owns the production scene state
 type Game struct {
@@ -93,32 +47,16 @@ type Game struct {
 	shadows   [4]*ebiten.Image
 
 	// Working canvases
-	chessboard     *ebiten.Image
-	chessboardMask *ebiten.Image
-	whitePixel     *ebiten.Image
-	theCanvas      *ebiten.Image
-	quadVertices   []ebiten.Vertex
-	quadIndices    []uint16
-
-	// Animation state
-	vbl   float64
-	vbl2  float64
-	xMove float64
-	yMove float64
-	xm    float64
-	ym    float64
-	fov   float64
-	speed float64
+	checkerboard *effects.PerspectiveCheckerboard
+	ballTrain    *effects.ProjectedBallTrain
+	theCanvas    *ebiten.Image
 
 	// Scrolltext
 	text1 string
 	text2 string
 
 	// 3D Doc animation
-	currentRadians             float64
-	docRadians                 [4]float64
-	overWriteFirstTwoWaveforms bool
-	elapsedSeconds             float64
+	elapsedSeconds float64
 
 	// Audio
 	audioContext *audio.Context
@@ -135,13 +73,7 @@ type Game struct {
 
 // NewGame constructs an independent game instance
 func NewGame() *Game {
-	g := &Game{
-		xm:                         0,
-		ym:                         315,
-		fov:                        250,
-		speed:                      1,
-		overWriteFirstTwoWaveforms: true,
-	}
+	g := &Game{}
 
 	// Messages
 	g.text1 = "               BILIZIR FROM DMA HAVE DONE IT AGAIN: A NEW GOLANG/EBITEN CONVERSION, THIS TIME THIS IS THE 3D-DOC FROM TCB    \\          "
@@ -220,15 +152,17 @@ func (g *Game) Init() error {
 			return fmt.Errorf("load shadow%d: %w", i+1, err)
 		}
 	}
+	g.ballTrain, err = effects.NewProjectedBallTrain(presets.DOCProjectedBalls(g.sphere, g.shadows[:]))
+	if err != nil {
+		return err
+	}
 
 	// Construct working canvases
-	g.chessboard = ebiten.NewImage(320, 80)
-	g.chessboardMask = ebiten.NewImage(320, 80)
-	g.whitePixel = ebiten.NewImage(1, 1)
-	g.whitePixel.Fill(color.White)
+	g.checkerboard, err = effects.NewPerspectiveCheckerboard(presets.DOCCheckerboard())
+	if err != nil {
+		return err
+	}
 	g.theCanvas = ebiten.NewImage(384, 270)
-	g.quadVertices = make([]ebiten.Vertex, 0, 44)
-	g.quadIndices = make([]uint16, 0, 66)
 
 	g.sceneCanvas = ebiten.NewImage(screenWidth, screenHeight)
 
@@ -262,263 +196,14 @@ func (g *Game) initAudio() error {
 	return nil
 }
 
-func (g *Game) resetQuadBatch() {
-	g.quadVertices = g.quadVertices[:0]
-	g.quadIndices = g.quadIndices[:0]
-}
-
-func (g *Game) appendQuad(x1, y1, x2, y2, x3, y3, x4, y4 float64, c color.RGBA) {
-	red := float32(c.R) / 255
-	green := float32(c.G) / 255
-	blue := float32(c.B) / 255
-	alpha := float32(c.A) / 255
-	base := uint16(len(g.quadVertices))
-	g.quadVertices = append(g.quadVertices,
-		ebiten.Vertex{
-			DstX:   float32(x1),
-			DstY:   float32(y1),
-			SrcX:   0,
-			SrcY:   0,
-			ColorR: red,
-			ColorG: green,
-			ColorB: blue,
-			ColorA: alpha,
-		},
-		ebiten.Vertex{
-			DstX:   float32(x2),
-			DstY:   float32(y2),
-			SrcX:   0,
-			SrcY:   0,
-			ColorR: red,
-			ColorG: green,
-			ColorB: blue,
-			ColorA: alpha,
-		},
-		ebiten.Vertex{
-			DstX:   float32(x3),
-			DstY:   float32(y3),
-			SrcX:   0,
-			SrcY:   0,
-			ColorR: red,
-			ColorG: green,
-			ColorB: blue,
-			ColorA: alpha,
-		},
-		ebiten.Vertex{
-			DstX:   float32(x4),
-			DstY:   float32(y4),
-			SrcX:   0,
-			SrcY:   0,
-			ColorR: red,
-			ColorG: green,
-			ColorB: blue,
-			ColorA: alpha,
-		},
-	)
-	g.quadIndices = append(g.quadIndices, base, base+1, base+2, base+2, base+3, base)
-}
-
-func (g *Game) drawQuadBatch(destination *ebiten.Image) {
-	op := &ebiten.DrawTrianglesOptions{}
-	op.FillRule = ebiten.FillAll
-	destination.DrawTriangles(g.quadVertices, g.quadIndices, g.whitePixel, op)
-}
-
-// drawChessboard renders the perspective checkerboard
-func (g *Game) drawChessboard(destinationCanvas *ebiten.Image) {
-	// Checkerboard stripe color
-	chessColor := color.RGBA{R: 136, G: 0, B: 136, A: 255} // #880088
-
-	// Clear the working surfaces
-	g.chessboard.Clear()
-	g.chessboardMask.Clear()
-	g.resetQuadBatch()
-
-	// 1. Draw vertical strips on the floor surface
-	for i := 0; i < 11; i++ {
-		x1 := -8 + float64(i)*32 + g.xMove
-		x2 := 8 + float64(i)*32 + g.xMove
-		x3 := -752 + float64(i)*192 + g.xMove*6
-		x4 := -848 + float64(i)*192 + g.xMove*6
-		g.appendQuad(x1, 0, x2, 0, x3, 80, x4, 80, chessColor)
-	}
-	g.drawQuadBatch(g.chessboard)
-
-	// 2. Draw horizontal strips into the mask
-	g.resetQuadBatch()
-	for i := -2; i < 8; i++ {
-		y1 := -20 + (g.fov/(g.fov+float64(2*i)*32-g.yMove))*50
-		y2 := -20 + (g.fov/(g.fov+float64(2*i)*32+32-g.yMove))*50
-		g.appendQuad(0, y1, 320, y1, 320, y2, 0, y2, chessColor)
-	}
-	g.drawQuadBatch(g.chessboardMask)
-
-	// 3. Combine the mask with the floor using XOR
-	op := &ebiten.DrawImageOptions{}
-	op.CompositeMode = ebiten.CompositeModeXor
-	g.chessboard.DrawImage(g.chessboardMask, op)
-
-	// 4. Draw the completed floor on the destination
-	drawOp := &ebiten.DrawImageOptions{}
-	drawOp.GeoM.Translate(32, 149)
-	destinationCanvas.DrawImage(g.chessboard, drawOp)
-}
-
-// getMovement selects an authored movement program
-func getMovement(index int, t float64, i int) Anim {
-	// Skip entrance programs zero and one after the opening
-	if index < 2 && t > 21 { // Après 3 cycles de 7 secondes
-		index = 2 + int(t/7)%6 // Boucler sur les animations 2-7
-	}
-
-	switch index {
-	case 0, 1:
-		return Anim{-5, 40, 0, 0}
-	case 2:
-		return Anim{-5, -60 - math.Sin(t*7)*95, 35, 150}
-	case 3:
-		return Anim{5, math.Sin((t+float64(i))*0.5*13)*90 - 50, 16, 150}
-	case 4:
-		return Anim{5, 80 - math.Abs(math.Sin((t+float64(i))*0.125*13.5)*8*math.Cos((t+float64(i))*0.125*13.5)*42) - 50, 20, 150}
-	case 5:
-		return Anim{5, math.Sin((t+float64(i))*0.25*13.5)*8*math.Cos((t+float64(i))*0.25*13.5)*22 - 50, 20, 150}
-	case 6:
-		return Anim{-7, math.Sin((t+float64(i))*0.25*13.5)*8*math.Cos((t+float64(i))*0.25*13.5)*22 - 50, 20, 150}
-	case 7:
-		return Anim{-8, 10 - math.Abs(math.Sin((t*0.6+float64(i)*0.05)*1.75)*70)*2.3, 20, 150}
-	default:
-		// Loop programs two through seven for later indices
-		return getMovement(2+(index-2)%6, t, i)
-	}
-}
-
-// blendAnim interpolates two movement poses
-func blendAnim(a, b Anim, alpha float64) Anim {
-	return Anim{
-		SpinSpeed:                a.SpinSpeed*(1-alpha) + b.SpinSpeed*alpha,
-		Displace:                 a.Displace*(1-alpha) + b.Displace*alpha,
-		BallLineDisplacement:     a.BallLineDisplacement*(1-alpha) + b.BallLineDisplacement*alpha,
-		RadiusFromCenterOfScreen: a.RadiusFromCenterOfScreen*(1-alpha) + b.RadiusFromCenterOfScreen*alpha,
-	}
-}
-
-func (g *Game) currentMovement(t float64, ball int) Anim {
-	animIndex := int(t/animDuration) % 8
-	if !g.overWriteFirstTwoWaveforms && animIndex < 2 {
-		animIndex = 2 + int(t/animDuration)%6
-	}
-	if g.overWriteFirstTwoWaveforms && animIndex < 2 {
-		animIndex = 7
-	}
-
-	alpha := math.Min(1, math.Mod(t/animDuration, 1)*animDuration*0.8)
-	return blendAnim(
-		getMovement(animIndex, t, ball),
-		getMovement(animIndex+1, t, ball),
-		alpha,
-	)
-}
-
-func (g *Game) updateDocAnimation() {
-	if g.overWriteFirstTwoWaveforms && g.elapsedSeconds > animDuration*3 {
-		g.overWriteFirstTwoWaveforms = false
-	}
-
-	for ball := range g.docRadians {
-		anim := g.currentMovement(g.elapsedSeconds, ball)
-		g.currentRadians += (math.Pi * 2 / 360) * anim.SpinSpeed * 0.15
-		g.currentRadians = math.Mod(g.currentRadians, math.Pi*2)
-		g.docRadians[ball] = g.currentRadians
-	}
-}
-
-// drawDoc renders the animated projected balls
-func (g *Game) drawDoc(screen *ebiten.Image) {
-	t := g.elapsedSeconds
-	var balls [4]Sprite
-	var ballShadows [4]Sprite
-
-	for i := 0; i < 4; i++ {
-		anim := g.currentMovement(t, i)
-
-		// Place the point on its base circle
-		currentPos := Vec3{X: anim.RadiusFromCenterOfScreen, Y: 0, Z: 0}
-		currentPos.RotateY(math.Pi * 2 / 360 * anim.BallLineDisplacement * float64(i))
-
-		// Add vertical motion
-		d := Vec3{X: 0, Y: anim.Displace, Z: 0}
-		p := Vec3{X: currentPos.X + d.X, Y: currentPos.Y + d.Y, Z: currentPos.Z + d.Z}
-
-		p.RotateY(g.docRadians[i])
-
-		// Place the shadow on the floor
-		ps := Vec3{X: p.X, Y: 60, Z: p.Z}
-
-		// Build the ball and shadow sprites
-		balls[i] = NewSprite(p, focalLength, screenWidth, screenHeight)
-		ballShadows[i] = NewSprite(ps, focalLength, screenWidth, screenHeight)
-	}
-
-	// Sort by depth, farthest first
-	// Keep matching ball and shadow indices
-	indices := [4]int{0, 1, 2, 3}
-	for i := 0; i < 3; i++ {
-		for j := i + 1; j < 4; j++ {
-			if balls[indices[i]].Z < balls[indices[j]].Z {
-				indices[i], indices[j] = indices[j], indices[i]
-			}
-		}
-	}
-
-	// Draw shadows first in depth order
-	for _, idx := range indices {
-		shadowColor := int(((ballShadows[idx].W - 0.5) * 10) / 2)
-		shadowColor = 3 - max(0, min(3, shadowColor))
-
-		verticalDisplace := math.Min(1, math.Max(0, 1-ballShadows[idx].W)) * 26
-
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(ballShadows[idx].W, ballShadows[idx].W)
-		op.GeoM.Translate(
-			ballShadows[idx].U-shadowWidth*0.5,
-			ballShadows[idx].V-shadowHeight*0.5-verticalDisplace,
-		)
-		screen.DrawImage(g.shadows[shadowColor], op)
-	}
-
-	// Draw balls in depth order
-	for _, idx := range indices {
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(balls[idx].W, balls[idx].W)
-		op.GeoM.Translate(
-			balls[idx].U-ballWidth*0.5,
-			balls[idx].V-ballHeight*0.5,
-		)
-		screen.DrawImage(g.sphere, op)
-	}
-}
-
-func wrap(value, period float64) float64 {
-	value = math.Mod(value, period)
-	if value < 0 {
-		value += period
-	}
-	return value
-}
-
 func (g *Game) updateMainAnimation() error {
-	g.speed = -math.Cos(g.vbl / 40)
-	g.vbl += 0.16
-	g.xm = 128 * math.Cos(g.vbl2/40)
-	g.vbl2 += 0.8
-
-	g.xMove = wrap(g.xMove+g.xm*g.speed*0.01, 32)
-	g.yMove = wrap(g.yMove+g.ym*g.speed*0.032, 64)
+	if err := g.checkerboard.Update(kit.Frame{}); err != nil {
+		return err
+	}
 	if err := g.mainScroll.Update(kit.Frame{}); err != nil {
 		return err
 	}
-	g.updateDocAnimation()
-	return nil
+	return g.ballTrain.AdvanceAt(g.elapsedSeconds)
 }
 
 // Update advances the scene once per simulation tick
@@ -553,6 +238,9 @@ func (g *Game) Update() error {
 	if !g.jump {
 		if g.introScroll.CursorRune() == '\\' {
 			g.jump = true
+			if err := g.ballTrain.PoseAt(g.elapsedSeconds); err != nil {
+				return err
+			}
 		}
 		if err := g.introScroll.Update(kit.Frame{}); err != nil {
 			return err
@@ -584,19 +272,19 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		// 3. Prepare the checkerboard on its working surface
 		g.theCanvas.Clear()
-		g.drawChessboard(g.theCanvas)
+		g.checkerboard.Draw(g.theCanvas)
 
 		// 4. Composite the floor with the authored transform
 		op = &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(2, 2.6)      // Agrandissement
-		op.GeoM.Translate(0, -128) // Décalage
+		op.GeoM.Scale(2, 2.6)      // Enlarge the authored stage.
+		op.GeoM.Translate(0, -128) // Move the projected floor into place.
 		scene.DrawImage(g.theCanvas, op)
 
 		// 5. Draw the shared animated scroller
 		g.mainScroll.Draw(scene)
 
 		// 6. Draw the projected balls last
-		g.drawDoc(scene)
+		g.ballTrain.Draw(scene)
 	}
 
 	screen.Fill(color.Black)

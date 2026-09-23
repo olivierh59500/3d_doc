@@ -119,20 +119,21 @@ func TestDrawDoesNotAdvanceAnimation(t *testing.T) {
 	}
 
 	type animationState struct {
-		vbl, vbl2               float64
 		xMove, yMove            float64
 		introCursor, mainCursor rune
-		currentRadians          float64
-		docRadians              [4]float64
-		overwriteFirstWaveforms bool
+		phase                   float64
+		angles                  [4]float64
 	}
 	snapshot := func() animationState {
+		xMove, yMove := game.checkerboard.Offset()
+		var angles [4]float64
+		for i := range angles {
+			angles[i] = game.ballTrain.Angle(i)
+		}
 		return animationState{
-			vbl: game.vbl, vbl2: game.vbl2,
-			xMove: game.xMove, yMove: game.yMove,
+			xMove: xMove, yMove: yMove,
 			introCursor: game.introScroll.CursorRune(), mainCursor: game.mainScroll.CursorRune(),
-			currentRadians: game.currentRadians, docRadians: game.docRadians,
-			overwriteFirstWaveforms: game.overWriteFirstTwoWaveforms,
+			phase: game.ballTrain.Phase(), angles: angles,
 		}
 	}
 
