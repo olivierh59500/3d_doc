@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/olivierh59500/democonstructionkit/sound"
+
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -62,19 +64,19 @@ func TestAdvanceScrollWraps(t *testing.T) {
 	}
 }
 
-func TestYMPlayerReadSupportsPartialFrames(t *testing.T) {
+func TestMusicStreamReadSupportsPartialFrames(t *testing.T) {
 	music, err := assets.ReadFile("assets/music.ym")
 	if err != nil {
 		t.Fatal(err)
 	}
-	player, err := NewYMPlayer(music, sampleRate, true)
+	player, err := sound.Open("music.ym", music, sound.Options{SampleRate: sampleRate, Loop: true, PCMFormat: sound.PCM16, Gain: 0.5})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = player.Close() })
 
-	if _, seekable := any(player).(io.Seeker); seekable {
-		t.Fatal("YMPlayer must not advertise seeking without repositioning the YM decoder")
+	if position, err := player.Seek(0, io.SeekStart); err != nil || position != 0 {
+		t.Fatalf("reset stream = %d, %v", position, err)
 	}
 
 	for _, size := range []int{1, 2, 3, 5, 4097} {
@@ -89,14 +91,22 @@ func TestYMPlayerReadSupportsPartialFrames(t *testing.T) {
 	}
 }
 
-func TestYMPlayerVolumeIsClamped(t *testing.T) {
-	player := &YMPlayer{}
+func TestMusicStreamVolumeIsClamped(t *testing.T) {
+	music, err := assets.ReadFile("assets/music.ym")
+	if err != nil {
+		t.Fatal(err)
+	}
+	player, err := sound.Open("music.ym", music, sound.Options{SampleRate: sampleRate, Loop: true, PCMFormat: sound.PCM16, Gain: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer player.Close()
 	player.SetVolume(-1)
-	if got := player.GetVolume(); got != 0 {
+	if got := player.Volume(); got != 0 {
 		t.Fatalf("volume below range = %v, want 0", got)
 	}
 	player.SetVolume(2)
-	if got := player.GetVolume(); got != 1 {
+	if got := player.Volume(); got != 1 {
 		t.Fatalf("volume above range = %v, want 1", got)
 	}
 }
@@ -152,12 +162,12 @@ func BenchmarkDraw(b *testing.B) {
 	}
 }
 
-func BenchmarkYMPlayerRead(b *testing.B) {
+func BenchmarkMusicStreamRead(b *testing.B) {
 	music, err := assets.ReadFile("assets/music.ym")
 	if err != nil {
 		b.Fatal(err)
 	}
-	player, err := NewYMPlayer(music, sampleRate, true)
+	player, err := sound.Open("music.ym", music, sound.Options{SampleRate: sampleRate, Loop: true, PCMFormat: sound.PCM16, Gain: 0.5})
 	if err != nil {
 		b.Fatal(err)
 	}

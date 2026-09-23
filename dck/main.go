@@ -1,26 +1,27 @@
 // Package threeddoc implements the TCB 3D DOC demo.
 package threeddoc
 
-import originalassets "3d_doc"
-
 import (
+	originalassets "3d_doc"
 	"bytes"
-
 	"fmt"
+
+	"github.com/olivierh59500/democonstructionkit/sound"
+
+	"image"
+	"image/color"
+
 	kit "github.com/olivierh59500/democonstructionkit"
 	"github.com/olivierh59500/democonstructionkit/composite"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
-	"image"
-	"image/color"
+
 	_ "image/png"
-	"io"
 	"log"
 	"math"
-	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
+
 	audio "github.com/olivierh59500/democonstructionkit/sound/output"
-	"github.com/olivierh59500/ym-player/pkg/stsound"
 )
 
 const (
@@ -40,135 +41,7 @@ const (
 )
 
 var assets = originalassets.
-
-	// YMPlayer wraps the YM player for Ebiten audio
 	DCKAssetAssets()
-
-type YMPlayer struct {
-	player        *stsound.StSound
-	buffer        []int16
-	mutex         sync.Mutex
-	pendingFrame  [4]byte
-	pendingOffset int
-	pendingCount  int
-	loop          bool
-	volume        float64
-}
-
-// NewYMPlayer creates a new YM player instance
-func NewYMPlayer(data []byte, sampleRate int, loop bool) (*YMPlayer, error) {
-	player := stsound.CreateWithRate(sampleRate)
-
-	if err := player.LoadMemory(data); err != nil {
-		player.Destroy()
-		return nil, fmt.Errorf("failed to load YM data: %w", err)
-	}
-
-	player.SetLoopMode(loop)
-
-	return &YMPlayer{
-		player: player,
-		buffer: make([]int16, 4096),
-		loop:   loop,
-		volume: 0.5,
-	}, nil
-}
-
-// Read implements io.Reader for audio streaming
-func (y *YMPlayer) Read(p []byte) (n int, err error) {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if y.player == nil {
-		return 0, io.ErrClosedPipe
-	}
-
-	if y.pendingCount > 0 {
-		copied := copy(p, y.pendingFrame[y.pendingOffset:y.pendingOffset+y.pendingCount])
-		y.pendingOffset += copied
-		y.pendingCount -= copied
-		n += copied
-		if y.pendingCount == 0 {
-			y.pendingOffset = 0
-		}
-		if n == len(p) {
-			return n, nil
-		}
-	}
-
-	for len(p)-n >= 4 {
-		chunkSize := (len(p) - n) / 4
-		if chunkSize > len(y.buffer) {
-			chunkSize = len(y.buffer)
-		}
-
-		if !y.player.Compute(y.buffer[:chunkSize], chunkSize) {
-			if !y.loop {
-				clear(p[n:])
-				return len(p), io.EOF
-			}
-		}
-
-		for i := 0; i < chunkSize; i++ {
-			sample := int16(float64(y.buffer[i]) * y.volume)
-			pos := n + i*4
-			low := byte(sample)
-			high := byte(uint16(sample) >> 8)
-			p[pos] = low
-			p[pos+1] = high
-			p[pos+2] = low
-			p[pos+3] = high
-		}
-
-		n += chunkSize * 4
-	}
-
-	if n == len(p) {
-		return n, nil
-	}
-
-	if !y.player.Compute(y.buffer[:1], 1) && !y.loop {
-		clear(p[n:])
-		return len(p), io.EOF
-	}
-	sample := int16(float64(y.buffer[0]) * y.volume)
-	y.pendingFrame = [4]byte{byte(sample), byte(uint16(sample) >> 8), byte(sample), byte(uint16(sample) >> 8)}
-	copied := copy(p[n:], y.pendingFrame[:])
-	n += copied
-	y.pendingOffset = copied
-	y.pendingCount = len(y.pendingFrame) - copied
-
-	return n, nil
-}
-
-// SetVolume sets the playback volume (0.0 to 1.0)
-func (y *YMPlayer) SetVolume(volume float64) {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-	y.volume = max(0, min(1, volume))
-}
-
-// GetVolume returns the current volume
-func (y *YMPlayer) GetVolume() float64 {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-	return y.volume
-}
-
-// Close releases resources
-func (y *YMPlayer) Close() error {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-
-	if y.player != nil {
-		y.player.Destroy()
-		y.player = nil
-	}
-	return nil
-}
 
 // Vec3 représente un vecteur 3D
 type Vec3 struct {
@@ -267,7 +140,7 @@ type Game struct {
 	// Audio
 	audioContext *audio.Context
 	audioPlayer  *audio.Player
-	ymPlayer     *YMPlayer
+	musicStream  *sound.Stream
 	audioReady   bool
 
 	// Surface fixe de la démo, centrée dans les écrans larges.
@@ -429,15 +302,15 @@ func (g *Game) initAudio() error {
 		return fmt.Errorf("music not found: %w", err)
 	}
 
-	g.ymPlayer, err = NewYMPlayer(musicData, sampleRate, true)
+	g.musicStream, err = sound.Open("music.ym", musicData, sound.Options{SampleRate: sampleRate, Loop: true, PCMFormat: sound.PCM16, Gain: 0.5})
 	if err != nil {
-		return fmt.Errorf("create YM player: %w", err)
+		return fmt.Errorf("open music: %w", err)
 	}
 
-	g.audioPlayer, err = g.audioContext.NewPlayer(g.ymPlayer)
+	g.audioPlayer, err = g.audioContext.NewPlayer(g.musicStream)
 	if err != nil {
-		_ = g.ymPlayer.Close()
-		g.ymPlayer = nil
+		_ = g.musicStream.Close()
+		g.musicStream = nil
 		return fmt.Errorf("create audio player: %w", err)
 	}
 
@@ -822,20 +695,20 @@ func (g *Game) Update() error {
 	}
 
 	// Contrôle du volume avec les touches haut/bas
-	if g.ymPlayer != nil {
+	if g.musicStream != nil {
 		if ebiten.IsKeyPressed(ebiten.KeyUp) {
-			vol := g.ymPlayer.GetVolume() + 0.01
+			vol := g.musicStream.Volume() + 0.01
 			if vol > 1.0 {
 				vol = 1.0
 			}
-			g.ymPlayer.SetVolume(vol)
+			g.musicStream.SetVolume(vol)
 		}
 		if ebiten.IsKeyPressed(ebiten.KeyDown) {
-			vol := g.ymPlayer.GetVolume() - 0.01
+			vol := g.musicStream.Volume() - 0.01
 			if vol < 0 {
 				vol = 0
 			}
-			g.ymPlayer.SetVolume(vol)
+			g.musicStream.SetVolume(vol)
 		}
 	}
 	g.elapsedSeconds += 1.0 / ebiten.DefaultTPS
@@ -929,8 +802,8 @@ func (g *Game) Cleanup() {
 		g.audioPlayer.Close()
 		g.audioPlayer = nil
 	}
-	if g.ymPlayer != nil {
-		g.ymPlayer.Close()
-		g.ymPlayer = nil
+	if g.musicStream != nil {
+		g.musicStream.Close()
+		g.musicStream = nil
 	}
 }

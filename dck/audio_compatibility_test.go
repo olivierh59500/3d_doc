@@ -1,0 +1,37 @@
+package threeddoc
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"testing"
+
+	"github.com/olivierh59500/democonstructionkit/sound"
+)
+
+// TestMusicPCMCompatibility preserves the audible level and PCM of the original adapter.
+func TestMusicPCMCompatibility(t *testing.T) {
+	musicData, err := assets.ReadFile("assets/music.ym")
+	if err != nil {
+		t.Fatal(err)
+	}
+	player, err := sound.Open("music.ym", musicData, sound.Options{SampleRate: sampleRate, Loop: true, PCMFormat: sound.PCM16, Gain: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer player.Close()
+	data := make([]byte, sampleRate*4)
+	for start := 0; start < len(data); {
+		end := min(start+4096, len(data))
+		n, err := player.Read(data[start:end])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != end-start {
+			t.Fatalf("read %d/%d", n, end-start)
+		}
+		start = end
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != "1926e21e003293bca2aab30dc5a23cbc6d5a2c103e5b0b8e69427b7814ab4072" {
+		t.Fatalf("soundtrack PCM changed: %s", got)
+	}
+}
