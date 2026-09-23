@@ -5,6 +5,7 @@ import (
 	originalassets "3d_doc"
 	"bytes"
 	"fmt"
+	"github.com/olivierh59500/democonstructionkit/presets"
 
 	"github.com/olivierh59500/democonstructionkit/sound"
 
@@ -184,11 +185,11 @@ func (g *Game) loadImage(path string) (*ebiten.Image, error) {
 
 func splitFont(font *ebiten.Image) [glyphCount]*ebiten.Image {
 	var glyphs [glyphCount]*ebiten.Image
-	for index := range glyphs {
-		srcX := (index % 10) * fontWidth
-		srcY := (index / 10) * fontHeight
-		glyphs[index] = font.SubImage(image.Rect(srcX, srcY, srcX+fontWidth, srcY+fontHeight)).(*ebiten.Image)
+	images, err := scrolling.GridImages(font, image.Pt(fontWidth, fontHeight), 10, glyphCount)
+	if err != nil {
+		panic(err)
 	}
+	copy(glyphs[:], images)
 	return glyphs
 }
 
@@ -319,38 +320,13 @@ func (g *Game) initAudio() error {
 	return nil
 }
 
-func glyphIndex(char byte) int {
-	switch {
-	case char == '!':
-		return 1
-	case char == '\'':
-		return 7
-	case char == '(':
-		return 8
-	case char == ')':
-		return 9
-	case char == ',':
-		return 12
-	case char == '-':
-		return 13
-	case char == '.':
-		return 14
-	case char >= '0' && char <= '9':
-		return 16 + int(char-'0')
-	case char == ':':
-		return 26
-	case char == ';':
-		return 27
-	case char == '?':
-		return 31
-	case char >= 'A' && char <= 'Z':
-		return 33 + int(char-'A')
-	case char >= 'a' && char <= 'z':
-		return 33 + int(char-'a')
-	default:
-		return 0
+var glyphIndex = func() func(byte) int {
+	lookup, err := presets.TileLookup("3d_doc", false)
+	if err != nil {
+		panic(err)
 	}
-}
+	return func(ch byte) int { index, _ := lookup(rune(ch)); return index }
+}()
 
 // drawChar dessine un caractère de la font.
 func (g *Game) drawChar(dst *ebiten.Image, glyphs *[glyphCount]*ebiten.Image, char byte, x, y, scale float64) {
