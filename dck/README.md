@@ -14,3 +14,6 @@ for both ordered main-text passes. The same engine samples fractional source
 columns for the paired fonts in Cuddly 3D DOC. Ten captures of this standalone
 screen, including late main-scene frames, match the previous renderer pixel for
 pixel.
+The intro/main switch also uses `timeline.IntroHandoff` with no new music cue,
+because this screen starts its soundtrack during the intro. The entry boundary
+remains tied to the authored text control character.

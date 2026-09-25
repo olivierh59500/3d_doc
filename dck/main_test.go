@@ -113,7 +113,7 @@ func TestDrawDoesNotAdvanceAnimation(t *testing.T) {
 	if err := game.Init(); err != nil {
 		t.Fatal(err)
 	}
-	game.jump = true
+	game.handoff.Step(true)
 	if err := game.updateMainAnimation(); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func BenchmarkDraw(b *testing.B) {
 	if err := game.Init(); err != nil {
 		b.Fatal(err)
 	}
-	game.jump = true
+	game.handoff.Step(true)
 	game.updateMainAnimation()
 	screen := ebiten.NewImage(screenWidth, screenHeight)
 

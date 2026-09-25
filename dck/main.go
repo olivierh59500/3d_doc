@@ -15,6 +15,7 @@ import (
 
 	kit "github.com/olivierh59500/democonstructionkit"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
+	"github.com/olivierh59500/democonstructionkit/timeline"
 
 	_ "image/png"
 	"log"
@@ -67,13 +68,17 @@ type Game struct {
 	// Fixed demo surface centered on wide displays.
 	sceneCanvas *ebiten.Image
 
-	// Scene phases
-	jump bool
+	// Scene phase and handoff boundary.
+	handoff *timeline.IntroHandoff
 }
 
 // NewGame constructs an independent game instance
 func NewGame() *Game {
-	g := &Game{}
+	handoff, err := timeline.NewIntroHandoff(timeline.IntroHandoffConfig{FadeStart: 1, FadeMax: 1})
+	if err != nil {
+		panic(err)
+	}
+	g := &Game{handoff: handoff}
 
 	// Messages
 	g.text1 = "               BILIZIR FROM DMA HAVE DONE IT AGAIN: A NEW GOLANG/EBITEN CONVERSION, THIS TIME THIS IS THE 3D-DOC FROM TCB    \\          "
@@ -235,18 +240,23 @@ func (g *Game) Update() error {
 	}
 	g.elapsedSeconds += 1.0 / ebiten.DefaultTPS
 
-	if !g.jump {
+	if !g.handoff.Main() {
 		if g.introScroll.CursorRune() == '\\' {
-			g.jump = true
+			g.handoff.Step(true)
 			if err := g.ballTrain.PoseAt(g.elapsedSeconds); err != nil {
 				return err
 			}
+		} else {
+			g.handoff.Step(false)
 		}
 		if err := g.introScroll.Update(kit.Frame{}); err != nil {
 			return err
 		}
-	} else if err := g.updateMainAnimation(); err != nil {
-		return err
+	} else {
+		g.handoff.Step(false)
+		if err := g.updateMainAnimation(); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -257,7 +267,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	scene := g.sceneCanvas
 	scene.Fill(color.Black)
 
-	if !g.jump {
+	if !g.handoff.Main() {
 		g.introScroll.Draw(scene)
 	} else {
 		// Main scene
