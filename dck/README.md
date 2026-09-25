@@ -8,3 +8,9 @@ The choreography and assets remain in this repository. Reusable rendering and
 effects come from the published `github.com/olivierh59500/democonstructionkit`
 module pinned in `go.mod`. Music is opened with `sound.Open`; DCK selects the decoder from the asset and
 provides the configured stereo PCM format. The demo keeps its playback level and loop settings.
+
+`scrolling.Config.RowBands` uses DCK's shared `composite.RowWarp` strip engine
+for both ordered main-text passes. The same engine samples fractional source
+columns for the paired fonts in Cuddly 3D DOC. Ten captures of this standalone
+screen, including late main-scene frames, match the previous renderer pixel for
+pixel.
